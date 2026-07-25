@@ -110,6 +110,40 @@ describe("version 1 Course structure", () => {
     expect(errorPaths(makeCourse(nineteen))).toContain("$.holes");
   });
 
+  it("rejects sparse Hole, region, and point arrays at their missing indexes", () => {
+    const sparseHoles = new Array<MutableHole>(1);
+
+    const sparseRegionsHole = makeHole();
+    const green = sparseRegionsHole.regions[0];
+    if (green === undefined) throw new Error("Missing Green fixture.");
+    sparseRegionsHole.regions = new Array<MutableRegion>(2);
+    sparseRegionsHole.regions[1] = green;
+
+    const sparseBoundaryHole = makeHole();
+    delete sparseBoundaryHole.boundary.points[1];
+
+    const sparseCorridorHole = makeHole();
+    const corridorPoints = new Array<MutablePoint>(2);
+    corridorPoints[0] = { x: 1, y: 1 };
+    sparseCorridorHole.regions.unshift({
+      terrain: "fairway",
+      shape: { type: "corridor", points: corridorPoints, width: 1 },
+    });
+
+    const cases = [
+      { input: makeCourse(sparseHoles), path: "$.holes[0]" },
+      { input: makeCourse([sparseRegionsHole]), path: "$.holes[0].regions[0]" },
+      { input: makeCourse([sparseBoundaryHole]), path: "$.holes[0].boundary.points[1]" },
+      { input: makeCourse([sparseCorridorHole]), path: "$.holes[0].regions[0].shape.points[1]" },
+    ];
+
+    for (const testCase of cases) {
+      expect(expectInvalid(testCase.input).errors).toEqual([
+        expect.objectContaining({ path: testCase.path, code: "invalid-array" }),
+      ]);
+    }
+  });
+
   it("rejects Hole name, declared length, and every other unknown field", () => {
     const hole = { ...makeHole(), name: "Forbidden", length: 5 };
     const result = expectInvalid(makeCourse([hole]));
@@ -193,6 +227,37 @@ describe("blocking Course validation", () => {
     expect(errorPaths(makeCourse([invalid]))).toEqual(expect.arrayContaining([
       "$.holes[0].id", "$.holes[0].number",
     ]));
+  });
+
+  it("keeps duplicate and geometry checks when an independent Hole field is invalid", () => {
+    const partial = makeHole(1);
+    partial.par = 6;
+    partial.boundary.points = [
+      { x: 0, y: 0 }, { x: 513, y: 0 }, { x: 513, y: 6 }, { x: 0, y: 6 },
+    ];
+    const duplicate = makeHole(1);
+
+    const result = expectInvalid(makeCourse([partial, duplicate]));
+    expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual([
+      { path: "$.holes[0].par", code: "invalid-par" },
+      { path: "$.holes[1].id", code: "duplicate-hole-id" },
+      { path: "$.holes[1].number", code: "duplicate-hole-number" },
+      { path: "$.holes[0].boundary", code: "boundary-too-large" },
+    ]);
+  });
+
+  it("runs every available placement check on a partially parsed Hole", () => {
+    const partial = makeHole();
+    partial.id = " ";
+    partial.tee = { x: -1, y: 1 };
+    partial.regions = [];
+
+    const result = expectInvalid(makeCourse([partial]));
+    expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual([
+      { path: "$.holes[0].id", code: "invalid-id" },
+      { path: "$.holes[0].tee", code: "point-outside-boundary" },
+      { path: "$.holes[0].cup", code: "cup-not-green" },
+    ]);
   });
 
   it("rejects invalid par and every non-finite coordinate", () => {

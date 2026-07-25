@@ -126,17 +126,46 @@ function parsePoint(
   return x === undefined || y === undefined ? undefined : { x, y };
 }
 
+function parseArrayItems<T>(
+  value: unknown,
+  path: string,
+  expected: string,
+  parseItem: (item: unknown, itemPath: string, errors: CourseDiagnostic[]) => T | undefined,
+  errors: CourseDiagnostic[],
+): readonly (T | undefined)[] | undefined {
+  if (!Array.isArray(value)) {
+    addError(errors, path, "invalid-array", expected);
+    return undefined;
+  }
+
+  const parsed: (T | undefined)[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const itemPath = `${path}[${index}]`;
+    if (!Object.hasOwn(value, index)) {
+      addError(errors, itemPath, "invalid-array", "Sparse array entries are not supported.");
+      parsed.push(undefined);
+      continue;
+    }
+    parsed.push(parseItem(value[index], itemPath, errors));
+  }
+  return parsed;
+}
+
 function parsePoints(
   value: unknown,
   path: string,
   errors: CourseDiagnostic[],
 ): readonly Point[] | undefined {
-  if (!Array.isArray(value)) {
-    addError(errors, path, "invalid-array", "Expected an array of points.");
-    return undefined;
-  }
-  const parsed = value.map((point, index) => parsePoint(point, `${path}[${index}]`, errors));
-  return parsed.every((point): point is Point => point !== undefined) ? parsed : undefined;
+  const parsed = parseArrayItems(
+    value,
+    path,
+    "Expected an array of points.",
+    parsePoint,
+    errors,
+  );
+  return parsed !== undefined && parsed.every((point): point is Point => point !== undefined)
+    ? parsed
+    : undefined;
 }
 
 function parsePolygon(
@@ -309,12 +338,15 @@ function parseRegions(
   path: string,
   errors: CourseDiagnostic[],
 ): readonly TerrainRegion[] | undefined {
-  if (!Array.isArray(value)) {
-    addError(errors, path, "invalid-array", "Expected an ordered array of Terrain regions.");
-    return undefined;
-  }
-  const regions = value.map((region, index) => parseRegion(region, `${path}[${index}]`, errors));
-  return regions.every((region): region is TerrainRegion => region !== undefined)
+  const regions = parseArrayItems(
+    value,
+    path,
+    "Expected an ordered array of Terrain regions.",
+    parseRegion,
+    errors,
+  );
+  return regions !== undefined
+      && regions.every((region): region is TerrainRegion => region !== undefined)
     ? regions
     : undefined;
 }
@@ -343,11 +375,21 @@ function parsePar(
   return value;
 }
 
+interface ParsedHole {
+  readonly id: string | undefined;
+  readonly number: number | undefined;
+  readonly par: 3 | 4 | 5 | undefined;
+  readonly boundary: PolygonShape | undefined;
+  readonly tee: Point | undefined;
+  readonly cup: Point | undefined;
+  readonly regions: readonly TerrainRegion[] | undefined;
+}
+
 function parseHole(
   value: unknown,
   path: string,
   errors: CourseDiagnostic[],
-): CourseHole | undefined {
+): ParsedHole | undefined {
   const record = inspectObject(
     value,
     path,
@@ -357,50 +399,70 @@ function parseHole(
   );
   if (record === undefined) return undefined;
 
-  const id = Object.hasOwn(record, "id")
-    ? parseNonBlankString(record.id, `${path}.id`, "invalid-id", errors)
-    : undefined;
-  const number = Object.hasOwn(record, "number")
-    ? parseHoleNumber(record.number, `${path}.number`, errors)
-    : undefined;
-  const par = Object.hasOwn(record, "par")
-    ? parsePar(record.par, `${path}.par`, errors)
-    : undefined;
-  const boundary = Object.hasOwn(record, "boundary")
-    ? parsePolygon(record.boundary, `${path}.boundary`, errors)
-    : undefined;
-  const tee = Object.hasOwn(record, "tee")
-    ? parsePoint(record.tee, `${path}.tee`, errors)
-    : undefined;
-  const cup = Object.hasOwn(record, "cup")
-    ? parsePoint(record.cup, `${path}.cup`, errors)
-    : undefined;
-  const regions = Object.hasOwn(record, "regions")
-    ? parseRegions(record.regions, `${path}.regions`, errors)
-    : undefined;
-
-  return id === undefined || number === undefined || par === undefined
-      || boundary === undefined || tee === undefined || cup === undefined || regions === undefined
-    ? undefined
-    : { id, number, par, boundary, tee, cup, regions };
+  return {
+    id: Object.hasOwn(record, "id")
+      ? parseNonBlankString(record.id, `${path}.id`, "invalid-id", errors)
+      : undefined,
+    number: Object.hasOwn(record, "number")
+      ? parseHoleNumber(record.number, `${path}.number`, errors)
+      : undefined,
+    par: Object.hasOwn(record, "par")
+      ? parsePar(record.par, `${path}.par`, errors)
+      : undefined,
+    boundary: Object.hasOwn(record, "boundary")
+      ? parsePolygon(record.boundary, `${path}.boundary`, errors)
+      : undefined,
+    tee: Object.hasOwn(record, "tee")
+      ? parsePoint(record.tee, `${path}.tee`, errors)
+      : undefined,
+    cup: Object.hasOwn(record, "cup")
+      ? parsePoint(record.cup, `${path}.cup`, errors)
+      : undefined,
+    regions: Object.hasOwn(record, "regions")
+      ? parseRegions(record.regions, `${path}.regions`, errors)
+      : undefined,
+  };
 }
 
-/** Resolves continuous geometry in region order, independently of cell rasterization. */
-export function terrainAtPoint(hole: CourseHole, point: Point): RasterTerrain {
-  if (!polygonContainsPoint(hole.boundary, point)) return OUT_OF_BOUNDS;
+function completeHole(hole: ParsedHole | undefined): CourseHole | undefined {
+  if (hole === undefined || hole.id === undefined || hole.number === undefined
+    || hole.par === undefined || hole.boundary === undefined || hole.tee === undefined
+    || hole.cup === undefined || hole.regions === undefined) return undefined;
+  return {
+    id: hole.id,
+    number: hole.number,
+    par: hole.par,
+    boundary: hole.boundary,
+    tee: hole.tee,
+    cup: hole.cup,
+    regions: hole.regions,
+  };
+}
+
+function terrainAtGeometry(
+  boundary: PolygonShape,
+  regions: readonly TerrainRegion[],
+  point: Point,
+): RasterTerrain {
+  if (!polygonContainsPoint(boundary, point)) return OUT_OF_BOUNDS;
   let terrain: Terrain = "rough";
-  for (const region of hole.regions) {
+  for (const region of regions) {
     if (shapeContainsPoint(region.shape, point)) terrain = region.terrain;
   }
   return terrain;
 }
 
-function regionAffectsCell(hole: CourseHole, region: TerrainRegion): boolean {
-  const bounds = rasterBounds(hole.boundary);
+/** Resolves continuous geometry in region order, independently of cell rasterization. */
+export function terrainAtPoint(hole: CourseHole, point: Point): RasterTerrain {
+  return terrainAtGeometry(hole.boundary, hole.regions, point);
+}
+
+function regionAffectsCell(boundary: PolygonShape, region: TerrainRegion): boolean {
+  const bounds = rasterBounds(boundary);
   for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
     for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
       const center = { x: x + 0.5, y: y + 0.5 };
-      if (polygonContainsPoint(hole.boundary, center)
+      if (polygonContainsPoint(boundary, center)
         && shapeContainsPoint(region.shape, center)) return true;
     }
   }
@@ -408,12 +470,15 @@ function regionAffectsCell(hole: CourseHole, region: TerrainRegion): boolean {
 }
 
 function validateHoleGeometry(
-  hole: CourseHole,
+  hole: ParsedHole,
   path: string,
   errors: CourseDiagnostic[],
   warnings: CourseWarning[],
 ): void {
-  const bounds = polygonBounds(hole.boundary);
+  const boundary = hole.boundary;
+  if (boundary === undefined) return;
+
+  const bounds = polygonBounds(boundary);
   const boundaryTooLarge = bounds.maxX - bounds.minX > MAX_BOUNDARY_EXTENT
     || bounds.maxY - bounds.minY > MAX_BOUNDARY_EXTENT;
   if (boundaryTooLarge) {
@@ -430,12 +495,15 @@ function validateHoleGeometry(
     { name: "cup", point: hole.cup },
   ] as const;
   for (const entry of points) {
+    if (entry.point === undefined) continue;
     const pointPath = `${path}.${entry.name}`;
-    if (!polygonContainsPoint(hole.boundary, entry.point)) {
+    if (!polygonContainsPoint(boundary, entry.point)) {
       addError(errors, pointPath, "point-outside-boundary", `${entry.name} must be inside the Course Boundary.`);
       continue;
     }
-    const terrain = terrainAtPoint(hole, entry.point);
+    if (hole.regions === undefined) continue;
+
+    const terrain = terrainAtGeometry(boundary, hole.regions, entry.point);
     if (terrain === "water" || terrain === "bunker") {
       addError(errors, pointPath, "point-on-hazard", `${entry.name} may not resolve to ${terrain}.`);
     }
@@ -444,9 +512,9 @@ function validateHoleGeometry(
     }
   }
 
-  if (boundaryTooLarge) return;
+  if (boundaryTooLarge || hole.regions === undefined) return;
   hole.regions.forEach((region, index) => {
-    if (!regionAffectsCell(hole, region)) {
+    if (!regionAffectsCell(boundary, region)) {
       warnings.push({
         path: `${path}.regions[${index}]`,
         code: "narrow-region",
@@ -457,7 +525,7 @@ function validateHoleGeometry(
 }
 
 interface IndexedHole {
-  readonly hole: CourseHole;
+  readonly hole: ParsedHole;
   readonly index: number;
 }
 
@@ -465,23 +533,27 @@ function reportDuplicates(holes: readonly IndexedHole[], errors: CourseDiagnosti
   const ids = new Map<string, number>();
   const numbers = new Map<number, number>();
   holes.forEach(({ hole, index }) => {
-    const priorId = ids.get(hole.id);
-    if (priorId === undefined) ids.set(hole.id, index);
-    else addError(
-      errors,
-      `$.holes[${index}].id`,
-      "duplicate-hole-id",
-      `Hole ID duplicates $.holes[${priorId}].id.`,
-    );
+    if (hole.id !== undefined) {
+      const priorId = ids.get(hole.id);
+      if (priorId === undefined) ids.set(hole.id, index);
+      else addError(
+        errors,
+        `$.holes[${index}].id`,
+        "duplicate-hole-id",
+        `Hole ID duplicates $.holes[${priorId}].id.`,
+      );
+    }
 
-    const priorNumber = numbers.get(hole.number);
-    if (priorNumber === undefined) numbers.set(hole.number, index);
-    else addError(
-      errors,
-      `$.holes[${index}].number`,
-      "duplicate-hole-number",
-      `Hole number duplicates $.holes[${priorNumber}].number.`,
-    );
+    if (hole.number !== undefined) {
+      const priorNumber = numbers.get(hole.number);
+      if (priorNumber === undefined) numbers.set(hole.number, index);
+      else addError(
+        errors,
+        `$.holes[${index}].number`,
+        "duplicate-hole-number",
+        `Hole number duplicates $.holes[${priorNumber}].number.`,
+      );
+    }
   });
 }
 
@@ -531,7 +603,13 @@ export function validateCourse(input: unknown): CourseValidationResult {
           `A Course must contain between 1 and ${MAX_HOLES} Holes.`,
         );
       }
-      const parsedHoles = record.holes.map((hole, index) => parseHole(hole, `$.holes[${index}]`, errors));
+      const parsedHoles = parseArrayItems(
+        record.holes,
+        "$.holes",
+        "Expected an ordered array of Holes.",
+        parseHole,
+        errors,
+      ) ?? [];
       const indexedHoles: IndexedHole[] = [];
       parsedHoles.forEach((hole, index) => {
         if (hole !== undefined) indexedHoles.push({ hole, index });
@@ -540,7 +618,10 @@ export function validateCourse(input: unknown): CourseValidationResult {
       indexedHoles.forEach(({ hole, index }) => {
         validateHoleGeometry(hole, `$.holes[${index}]`, errors, warnings);
       });
-      if (parsedHoles.every((hole): hole is CourseHole => hole !== undefined)) holes = parsedHoles;
+      const completeHoles = parsedHoles.map(completeHole);
+      if (completeHoles.every((hole): hole is CourseHole => hole !== undefined)) {
+        holes = completeHoles;
+      }
     }
   }
 
