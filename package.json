@@ -11,6 +11,7 @@
   "files": [
     ".pi/extensions/golf/index.ts",
     ".pi/extensions/golf/domain/index.ts",
+    "scripts/patch-pi-brace-expansion.mjs",
     "README.md"
   ],
   "engines": {
