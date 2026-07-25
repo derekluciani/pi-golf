@@ -1,0 +1,36 @@
+{
+  "name": "pi-golf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A deterministic golf game implemented as a project-local Pi extension.",
+  "exports": {
+    ".": "./.pi/extensions/golf/index.ts",
+    "./domain": "./.pi/extensions/golf/domain/index.ts"
+  },
+  "files": [
+    ".pi/extensions/golf/index.ts",
+    ".pi/extensions/golf/domain/index.ts",
+    "scripts/patch-pi-brace-expansion.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "postinstall": "node scripts/patch-pi-brace-expansion.mjs"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.19.15",
+    "brace-expansion": "5.0.8",
+    "eslint": "10.8.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.65.0",
+    "vitest": "3.2.7"
+  }
+}
