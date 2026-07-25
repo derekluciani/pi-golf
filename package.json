@@ -1,0 +1,33 @@
+{
+  "name": "pi-golf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A deterministic golf game implemented as a project-local Pi extension.",
+  "exports": {
+    ".": "./.pi/extensions/golf/index.ts",
+    "./domain": "./.pi/extensions/golf/domain/index.ts"
+  },
+  "files": [
+    ".pi/extensions/golf/index.ts",
+    ".pi/extensions/golf/domain/index.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@eslint/js": "9.39.4",
+    "@types/node": "22.19.15",
+    "eslint": "9.39.4",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.57.1",
+    "vitest": "3.2.4"
+  }
+}
