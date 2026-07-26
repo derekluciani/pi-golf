@@ -28,6 +28,7 @@ export {
 } from "./loading.ts";
 export {
   getCourseProjectPaths,
+  isReservedBuiltInCourseId,
   PREVIEW_COURSE_ID,
   PREVIEW_COURSE_SETTINGS,
   PREVIEW_COURSE_SOURCE,
@@ -55,6 +56,7 @@ export {
   GOLF_SETTINGS_TITLE,
   showCourseSettings,
   type CourseSettingOption,
+  type CourseSettingsComponent,
   type CourseSettingsComponentOptions,
   type CourseSettingsModel,
 } from "./ui.ts";

@@ -1,9 +1,17 @@
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 
 export const PREVIEW_COURSE_ID = "preview-course";
 export const PREVIEW_COURSE_SOURCE = "builtin:preview-course";
+
+const RESERVED_BUILT_IN_COURSE_IDS: ReadonlySet<string> = new Set([PREVIEW_COURSE_ID]);
+
+/** Keeps every external-loading path aligned with the IDs owned by built-in content. */
+export function isReservedBuiltInCourseId(courseId: string): boolean {
+  return RESERVED_BUILT_IN_COURSE_IDS.has(courseId);
+}
 
 export interface CourseSettings {
   readonly selectedCourseId: string;
@@ -123,24 +131,32 @@ export async function readCourseSettings(cwd: string): Promise<CourseSettingsRea
 }
 
 const pendingWrites = new Map<string, Promise<void>>();
-let temporaryFileSequence = 0;
 
 async function writeSettingsAtomically(settingsPath: string, settings: CourseSettings): Promise<void> {
   await mkdir(dirname(settingsPath), { recursive: true });
-  temporaryFileSequence += 1;
-  const temporaryPath = `${settingsPath}.${process.pid}.${temporaryFileSequence}.tmp`;
+  const temporaryPath = `${settingsPath}.${process.pid}.${randomUUID()}.tmp`;
   const contents = `${JSON.stringify(settings, null, 2)}\n`;
+  let ownsTemporaryPath = false;
+  let temporaryFile: Awaited<ReturnType<typeof open>> | undefined;
+
   try {
-    await writeFile(temporaryPath, contents, { encoding: "utf8", flag: "wx" });
+    // Exclusive creation establishes ownership before any content is written.
+    // A reloaded runtime therefore cannot remove another writer's artifact.
+    temporaryFile = await open(temporaryPath, "wx");
+    ownsTemporaryPath = true;
+    await temporaryFile.writeFile(contents, { encoding: "utf8" });
+    await temporaryFile.close();
+    temporaryFile = undefined;
     await rename(temporaryPath, settingsPath);
   } finally {
-    await rm(temporaryPath, { force: true });
+    await temporaryFile?.close().catch(() => undefined);
+    if (ownsTemporaryPath) await rm(temporaryPath, { force: true });
   }
 }
 
 /**
- * Serializes writes per project and commits each complete JSON document through
- * a same-directory rename, so overlapping UI changes cannot leave partial JSON.
+ * Serializes writes from this runtime and commits each complete JSON document
+ * through a uniquely owned same-directory temporary file and atomic rename.
  */
 export async function writeCourseSettings(cwd: string, settings: CourseSettings): Promise<void> {
   if (!isCourseSettings(settings)) throw new Error("Refusing to persist invalid Golf settings.");

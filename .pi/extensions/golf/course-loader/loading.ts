@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { extname, join, relative } from "node:path";
 
+import { isReservedBuiltInCourseId } from "./settings.ts";
 import { parseCourse } from "./validation.ts";
 import type { Course, CourseDiagnostic, CourseWarning } from "./types.ts";
 
@@ -9,6 +10,7 @@ export type CourseLoadIssueCode =
   | "duplicate-course-id"
   | "invalid-course"
   | "malformed-json"
+  | "reserved-course-id"
   | "unreadable-course"
   | "unreadable-directory";
 
@@ -81,6 +83,17 @@ export async function loadCourseFile(sourcePath: string): Promise<CourseFileLoad
     };
   }
 
+  if (isReservedBuiltInCourseId(validation.value.id)) {
+    return {
+      ok: false,
+      issue: issue(
+        "reserved-course-id",
+        sourcePath,
+        `Course ID ${JSON.stringify(validation.value.id)} is reserved by built-in content; choose a different Course ID.`,
+      ),
+    };
+  }
+
   return {
     ok: true,
     value: { course: validation.value, sourcePath, warnings: validation.warnings },
@@ -129,7 +142,6 @@ async function findJsonFiles(directory: string, missingIsEmpty = false): Promise
 function duplicateIdIssues(
   discoveryDirectory: string,
   courses: readonly LoadedCourseFile[],
-  reservedCourseIds: ReadonlySet<string>,
 ): { readonly courses: LoadedCourseFile[]; readonly warnings: CourseLoadIssue[] } {
   const byId = new Map<string, LoadedCourseFile[]>();
   for (const course of courses) {
@@ -142,7 +154,7 @@ function duplicateIdIssues(
   const warnings: CourseLoadIssue[] = [];
   for (const course of courses) {
     const matches = byId.get(course.course.id) ?? [];
-    if (matches.length === 1 && !reservedCourseIds.has(course.course.id)) {
+    if (matches.length === 1) {
       selectable.push(course);
       continue;
     }
@@ -150,13 +162,10 @@ function duplicateIdIssues(
       .map((match) => relative(discoveryDirectory, match.sourcePath))
       .sort()
       .join(", ");
-    const detail = reservedCourseIds.has(course.course.id)
-      ? "the built-in Course"
-      : `multiple files (${sources})`;
     warnings.push(issue(
       "duplicate-course-id",
       course.sourcePath,
-      `Course ID ${JSON.stringify(course.course.id)} conflicts with ${detail}; this file is not selectable.`,
+      `Course ID ${JSON.stringify(course.course.id)} conflicts with multiple files (${sources}); this file is not selectable.`,
     ));
   }
   return { courses: selectable, warnings };
@@ -166,10 +175,7 @@ function duplicateIdIssues(
  * Recursively discovers JSON files in stable path order. A missing root is an
  * empty custom list; every other file/directory failure remains a warning.
  */
-export async function discoverCourses(
-  discoveryDirectory: string,
-  reservedCourseIds: ReadonlySet<string> = new Set(["preview-course"]),
-): Promise<CourseDiscoveryResult> {
+export async function discoverCourses(discoveryDirectory: string): Promise<CourseDiscoveryResult> {
   const walked = await findJsonFiles(discoveryDirectory, true);
   const loaded: LoadedCourseFile[] = [];
   const warnings = [...walked.warnings];
@@ -192,7 +198,7 @@ export async function discoverCourses(
     }
   }
 
-  const deduplicated = duplicateIdIssues(discoveryDirectory, loaded, reservedCourseIds);
+  const deduplicated = duplicateIdIssues(discoveryDirectory, loaded);
   return {
     courses: deduplicated.courses,
     warnings: [...warnings, ...deduplicated.warnings],

@@ -161,6 +161,26 @@ describe("project-local extension entrypoint", () => {
     );
   });
 
+  it("reports a reserved explicit Course ID and preserves prior settings", async () => {
+    const cwd = await temporaryProject("reserved");
+    const priorPath = join(cwd, "prior.json");
+    await writeFile(priorPath, JSON.stringify(validCourse("prior-course")), "utf8");
+    const { command } = register();
+    await command.handler("course prior.json", context(cwd).value);
+    const before = (await readCourseSettings(cwd)).settings;
+
+    const reservedPath = join(cwd, "reserved.json");
+    await writeFile(reservedPath, JSON.stringify(validCourse("preview-course")), "utf8");
+    const reservedContext = context(cwd);
+    await command.handler("course reserved.json", reservedContext.value);
+
+    expect(String(reservedContext.notify.mock.calls[0]?.[0])).toContain(
+      "reserved by built-in content",
+    );
+    expect(reservedContext.notify.mock.calls[0]?.[1]).toBe("error");
+    expect((await readCourseSettings(cwd)).settings).toEqual(before);
+  });
+
   it("reports malformed JSON and every validator path without replacing settings", async () => {
     const cwd = await temporaryProject("errors");
     const malformedPath = join(cwd, "malformed.json");

@@ -145,9 +145,11 @@ describe("custom Course discovery", () => {
     const result = await discoverCourses(coursesDirectory);
     expect(result.courses.map((loaded) => loaded.course.id)).toEqual(["unique-id"]);
     expect(result.warnings).toHaveLength(3);
-    expect(result.warnings.every((warning) => warning.code === "duplicate-course-id")).toBe(true);
+    expect(result.warnings.map((warning) => warning.code)).toEqual([
+      "reserved-course-id", "duplicate-course-id", "duplicate-course-id",
+    ]);
     expect(result.warnings.map((warning) => warning.message).join("\n")).toContain("a.json, b.json");
-    expect(result.warnings.map((warning) => warning.message).join("\n")).toContain("built-in Course");
+    expect(result.warnings.map((warning) => warning.message).join("\n")).toContain("reserved by built-in content");
   });
 });
 
@@ -208,6 +210,23 @@ describe("project Course settings and explicit selection", () => {
     expect(invalidResult.issue.diagnostics.map((diagnostic) => diagnostic.path)).toEqual(expect.arrayContaining([
       "$.holes[0].par", "$.holes[0].cup",
     ]));
+    expect(await readFile(settingsPath)).toEqual(before);
+  });
+
+  it("rejects an explicit external Course using a reserved built-in ID without changing settings", async () => {
+    const cwd = await temporaryProject("reserved-explicit");
+    const { settingsPath } = getCourseProjectPaths(cwd);
+    await writeCourseSettings(cwd, { selectedCourseId: "prior", sourcePath: "/prior.json" });
+    const before = await readFile(settingsPath);
+    const sourcePath = join(cwd, "preview impostor.json");
+    await writeJson(sourcePath, makeCourse("preview-course", "Preview Impostor"));
+
+    const result = await selectCourseFromPath(cwd, sourcePath);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected reserved Course selection to fail.");
+    expect(result.issue.code).toBe("reserved-course-id");
+    expect(result.issue.message).toContain("choose a different Course ID");
     expect(await readFile(settingsPath)).toEqual(before);
   });
 
