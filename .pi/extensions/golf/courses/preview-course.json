@@ -1,0 +1,196 @@
+{
+  "schemaVersion": 1,
+  "id": "preview-course",
+  "name": "Preview Course",
+  "holes": [
+    {
+      "id": "hole-1",
+      "number": 1,
+      "par": 4,
+      "boundary": {
+        "type": "polygon",
+        "points": [
+          { "x": 5, "y": 0 },
+          { "x": 115, "y": 0 },
+          { "x": 118.5, "y": 1.5 },
+          { "x": 120, "y": 5 },
+          { "x": 120, "y": 35 },
+          { "x": 118.5, "y": 38.5 },
+          { "x": 115, "y": 40 },
+          { "x": 5, "y": 40 },
+          { "x": 1.5, "y": 38.5 },
+          { "x": 0, "y": 35 },
+          { "x": 0, "y": 5 },
+          { "x": 1.5, "y": 1.5 }
+        ]
+      },
+      "tee": { "x": 8, "y": 20 },
+      "cup": { "x": 113, "y": 20 },
+      "regions": [
+        {
+          "terrain": "fairway",
+          "shape": {
+            "type": "corridor",
+            "points": [
+              { "x": 8, "y": 20 },
+              { "x": 113, "y": 20 }
+            ],
+            "width": 18
+          }
+        },
+        {
+          "terrain": "green",
+          "shape": {
+            "type": "ellipse",
+            "center": { "x": 113, "y": 20 },
+            "radiusX": 8,
+            "radiusY": 6
+          }
+        }
+      ]
+    },
+    {
+      "id": "hole-2",
+      "number": 2,
+      "par": 3,
+      "boundary": {
+        "type": "polygon",
+        "points": [
+          { "x": 5, "y": 0 },
+          { "x": 60, "y": 0 },
+          { "x": 65, "y": 5 },
+          { "x": 65, "y": 45 },
+          { "x": 60, "y": 50 },
+          { "x": 5, "y": 50 },
+          { "x": 0, "y": 45 },
+          { "x": 0, "y": 5 }
+        ]
+      },
+      "tee": { "x": 8, "y": 43 },
+      "cup": { "x": 52, "y": 10 },
+      "regions": [
+        {
+          "terrain": "fairway",
+          "shape": {
+            "type": "corridor",
+            "points": [
+              { "x": 8, "y": 43 },
+              { "x": 52, "y": 10 }
+            ],
+            "width": 12
+          }
+        },
+        {
+          "terrain": "rough",
+          "shape": {
+            "type": "ellipse",
+            "center": { "x": 28, "y": 28 },
+            "radiusX": 6,
+            "radiusY": 5
+          }
+        },
+        {
+          "terrain": "green",
+          "shape": {
+            "type": "ellipse",
+            "center": { "x": 52, "y": 10 },
+            "radiusX": 7,
+            "radiusY": 6
+          }
+        },
+        {
+          "terrain": "bunker",
+          "shape": {
+            "type": "ellipse",
+            "center": { "x": 43, "y": 7 },
+            "radiusX": 5,
+            "radiusY": 4
+          }
+        },
+        {
+          "terrain": "bunker",
+          "shape": {
+            "type": "ellipse",
+            "center": { "x": 53, "y": 19 },
+            "radiusX": 5,
+            "radiusY": 4
+          }
+        }
+      ]
+    },
+    {
+      "id": "hole-4",
+      "number": 4,
+      "par": 5,
+      "boundary": {
+        "type": "polygon",
+        "points": [
+          { "x": 6, "y": 0 },
+          { "x": 174, "y": 0 },
+          { "x": 180, "y": 6 },
+          { "x": 180, "y": 54 },
+          { "x": 174, "y": 60 },
+          { "x": 6, "y": 60 },
+          { "x": 0, "y": 54 },
+          { "x": 0, "y": 6 }
+        ]
+      },
+      "tee": { "x": 8, "y": 30 },
+      "cup": { "x": 168, "y": 30 },
+      "regions": [
+        {
+          "terrain": "fairway",
+          "shape": {
+            "type": "corridor",
+            "points": [
+              { "x": 8, "y": 30 },
+              { "x": 65, "y": 22 },
+              { "x": 110, "y": 38 },
+              { "x": 168, "y": 30 }
+            ],
+            "width": 16
+          }
+        },
+        {
+          "terrain": "water",
+          "shape": {
+            "type": "polygon",
+            "points": [
+              { "x": 75, "y": 0 },
+              { "x": 100, "y": 0 },
+              { "x": 100, "y": 60 },
+              { "x": 75, "y": 60 }
+            ]
+          }
+        },
+        {
+          "terrain": "green",
+          "shape": {
+            "type": "ellipse",
+            "center": { "x": 168, "y": 30 },
+            "radiusX": 8,
+            "radiusY": 7
+          }
+        },
+        {
+          "terrain": "bunker",
+          "shape": {
+            "type": "ellipse",
+            "center": { "x": 157, "y": 20 },
+            "radiusX": 6,
+            "radiusY": 4
+          }
+        },
+        {
+          "terrain": "bunker",
+          "shape": {
+            "type": "ellipse",
+            "center": { "x": 157, "y": 40 },
+            "radiusX": 6,
+            "radiusY": 4
+          }
+        }
+      ]
+    }
+  ]
+}

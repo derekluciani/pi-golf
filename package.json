@@ -7,7 +7,8 @@
   "exports": {
     ".": "./.pi/extensions/golf/index.ts",
     "./domain": "./.pi/extensions/golf/domain/index.ts",
-    "./course-loader": "./.pi/extensions/golf/course-loader/index.ts"
+    "./course-loader": "./.pi/extensions/golf/course-loader/index.ts",
+    "./courses": "./.pi/extensions/golf/courses/index.ts"
   },
   "files": [
     ".pi/extensions/golf/index.ts",
@@ -20,7 +21,11 @@
     ".pi/extensions/golf/course-loader/rasterizer.ts",
     ".pi/extensions/golf/course-loader/schema.ts",
     ".pi/extensions/golf/course-loader/types.ts",
-    ".pi/extensions/golf/course-loader/validation.ts"
+    ".pi/extensions/golf/course-loader/validation.ts",
+    ".pi/extensions/golf/courses/index.ts",
+    ".pi/extensions/golf/courses/preview-course.json",
+    "docs/course-format.md",
+    "docs/examples/minimal-course.json"
   ],
   "engines": {
     "node": ">=20"
