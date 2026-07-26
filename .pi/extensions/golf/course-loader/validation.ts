@@ -1,3 +1,5 @@
+import { Ajv2020 } from "ajv/dist/2020.js";
+
 import { TERRAINS, type Terrain } from "../domain/index.ts";
 import {
   isValidCorridor,
@@ -5,10 +7,12 @@ import {
   polygonBounds,
   polygonContainsPoint,
   rasterBounds,
+  rasterCellCenter,
   shapeContainsPoint,
 } from "./geometry.ts";
 import {
   COURSE_REQUIRED_PROPERTIES,
+  COURSE_SCHEMA,
   COURSE_SCHEMA_VERSION,
   HOLE_REQUIRED_PROPERTIES,
   MAX_BOUNDARY_EXTENT,
@@ -31,6 +35,16 @@ import {
   type RegionShape,
   type TerrainRegion,
 } from "./types.ts";
+
+const validateStructureAgainstCourseSchema = new Ajv2020({
+  allErrors: true,
+  strict: true,
+}).compile(COURSE_SCHEMA);
+
+/** Structural-only validation compiled directly from the authoritative Course schema. */
+export function validateCourseStructure(input: unknown): boolean {
+  return validateStructureAgainstCourseSchema(input);
+}
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -459,9 +473,10 @@ export function terrainAtPoint(hole: CourseHole, point: Point): RasterTerrain {
 
 function regionAffectsCell(boundary: PolygonShape, region: TerrainRegion): boolean {
   const bounds = rasterBounds(boundary);
-  for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
-    for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
-      const center = { x: x + 0.5, y: y + 0.5 };
+  // Offset counters remain bounded even when an absolute coordinate cannot advance by one.
+  for (let rowOffset = 0; rowOffset < bounds.height; rowOffset += 1) {
+    for (let columnOffset = 0; columnOffset < bounds.width; columnOffset += 1) {
+      const center = rasterCellCenter(bounds, columnOffset, rowOffset);
       if (polygonContainsPoint(boundary, center)
         && shapeContainsPoint(region.shape, center)) return true;
     }
@@ -562,6 +577,7 @@ function reportDuplicates(holes: readonly IndexedHole[], errors: CourseDiagnosti
  * independently discoverable validation failure with a JSONPath.
  */
 export function validateCourse(input: unknown): CourseValidationResult {
+  const structurallyValid = validateCourseStructure(input);
   const errors: CourseDiagnostic[] = [];
   const warnings: CourseWarning[] = [];
   const record = inspectObject(
@@ -625,7 +641,13 @@ export function validateCourse(input: unknown): CourseValidationResult {
     }
   }
 
-  if (errors.length > 0 || schemaVersion === undefined || id === undefined
+  // The path-aware parser mirrors schema diagnostics. This fallback guards future
+  // parser drift while schema acceptance remains the structural source of truth.
+  if (!structurallyValid && errors.length === 0) {
+    addError(errors, "$", "invalid-object", "Course does not match the version 1 structural schema.");
+  }
+
+  if (!structurallyValid || errors.length > 0 || schemaVersion === undefined || id === undefined
     || name === undefined || holes === undefined) {
     return { ok: false, errors, warnings };
   }

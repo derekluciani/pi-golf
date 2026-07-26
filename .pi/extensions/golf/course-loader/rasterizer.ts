@@ -3,6 +3,7 @@ import {
   boundarySegments,
   polygonContainsPoint,
   rasterBounds,
+  rasterCellCenter,
   shapeContainsPoint,
 } from "./geometry.ts";
 import {
@@ -22,9 +23,10 @@ export function rasterizeHole(hole: CourseHole): RasterizedHole {
   const bounds = rasterBounds(hole.boundary);
   const cells: RasterTerrain[] = [];
 
-  for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
-    for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
-      const center = { x: x + 0.5, y: y + 0.5 };
+  // Absolute coordinates may not advance by one at large finite offsets.
+  for (let rowOffset = 0; rowOffset < bounds.height; rowOffset += 1) {
+    for (let columnOffset = 0; columnOffset < bounds.width; columnOffset += 1) {
+      const center = rasterCellCenter(bounds, columnOffset, rowOffset);
       if (!polygonContainsPoint(hole.boundary, center)) {
         cells.push(OUT_OF_BOUNDS);
         continue;

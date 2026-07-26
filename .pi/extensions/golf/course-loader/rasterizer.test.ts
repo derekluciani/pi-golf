@@ -1,3 +1,6 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -179,6 +182,23 @@ describe("deterministic Terrain rasterization", () => {
     const first = Buffer.from(JSON.stringify(rasterizeHole(hole)));
     const second = Buffer.from(JSON.stringify(rasterizeHole(hole)));
     expect(first.equals(second)).toBe(true);
+  });
+
+  it("completes validation and repeated rasterization at a large finite offset", () => {
+    const viteNodePath = fileURLToPath(
+      new URL("../../../../node_modules/vite-node/vite-node.mjs", import.meta.url),
+    );
+    const probePath = fileURLToPath(new URL("./large-offset.probe.ts", import.meta.url));
+    const probe = spawnSync(
+      process.execPath,
+      [viteNodePath, "--script", probePath],
+      { encoding: "utf8", timeout: 5_000 },
+    );
+
+    expect(probe.error, probe.stderr).toBeUndefined();
+    expect(probe.signal, probe.stderr).toBeNull();
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(Number(probe.stdout.trim())).toBeGreaterThan(0);
   });
 
   it("calculates display Length instead of reading a declared value", () => {

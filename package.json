@@ -6,13 +6,21 @@
   "description": "A deterministic golf game implemented as a project-local Pi extension.",
   "exports": {
     ".": "./.pi/extensions/golf/index.ts",
-    "./domain": "./.pi/extensions/golf/domain/index.ts"
+    "./domain": "./.pi/extensions/golf/domain/index.ts",
+    "./course-loader": "./.pi/extensions/golf/course-loader/index.ts"
   },
   "files": [
     ".pi/extensions/golf/index.ts",
     ".pi/extensions/golf/domain/index.ts",
     "scripts/patch-pi-brace-expansion.mjs",
-    "README.md"
+    "README.md",
+    ".pi/extensions/golf/course-loader/course.schema.json",
+    ".pi/extensions/golf/course-loader/geometry.ts",
+    ".pi/extensions/golf/course-loader/index.ts",
+    ".pi/extensions/golf/course-loader/rasterizer.ts",
+    ".pi/extensions/golf/course-loader/schema.ts",
+    ".pi/extensions/golf/course-loader/types.ts",
+    ".pi/extensions/golf/course-loader/validation.ts"
   ],
   "engines": {
     "node": ">=20"
@@ -27,11 +35,13 @@
     "@earendil-works/pi-coding-agent": "0.82.1",
     "@eslint/js": "10.0.1",
     "@types/node": "22.19.15",
-    "ajv": "8.20.0",
     "brace-expansion": "5.0.8",
     "eslint": "10.8.0",
     "typescript": "5.9.3",
     "typescript-eslint": "8.65.0",
     "vitest": "3.2.7"
+  },
+  "dependencies": {
+    "ajv": "8.20.0"
   }
 }

@@ -14,7 +14,7 @@ export {
   rasterizeHole,
   terrainAtCell,
 } from "./rasterizer.ts";
-export { parseCourse, terrainAtPoint, validateCourse } from "./validation.ts";
+export { parseCourse, terrainAtPoint, validateCourse, validateCourseStructure } from "./validation.ts";
 export {
   OUT_OF_BOUNDS,
   type BoundarySegment,

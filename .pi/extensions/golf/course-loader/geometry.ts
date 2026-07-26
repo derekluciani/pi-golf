@@ -50,6 +50,18 @@ export function rasterBounds(polygon: PolygonShape): RasterBounds {
   };
 }
 
+/** Center sample for a bounded raster offset, preserving mathematical half-cell order. */
+export function rasterCellCenter(
+  bounds: RasterBounds,
+  columnOffset: number,
+  rowOffset: number,
+): Point {
+  return {
+    x: bounds.minX + (columnOffset + 0.5),
+    y: bounds.minY + (rowOffset + 0.5),
+  };
+}
+
 export function boundarySegments(polygon: PolygonShape): readonly BoundarySegment[] {
   const first = polygon.points[0];
   if (first === undefined) return [];
