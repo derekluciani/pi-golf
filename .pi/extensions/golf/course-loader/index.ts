@@ -17,6 +17,48 @@ export {
 } from "./rasterizer.ts";
 export { parseCourse, terrainAtPoint, validateCourse, validateCourseStructure } from "./validation.ts";
 export {
+  discoverCourses,
+  formatCourseLoadIssue,
+  loadCourseFile,
+  type CourseDiscoveryResult,
+  type CourseFileLoadResult,
+  type CourseLoadIssue,
+  type CourseLoadIssueCode,
+  type LoadedCourseFile,
+} from "./loading.ts";
+export {
+  getCourseProjectPaths,
+  PREVIEW_COURSE_ID,
+  PREVIEW_COURSE_SETTINGS,
+  PREVIEW_COURSE_SOURCE,
+  readCourseSettings,
+  writeCourseSettings,
+  type CourseSettings,
+  type CourseSettingsIssue,
+  type CourseSettingsIssueCode,
+  type CourseSettingsReadResult,
+} from "./settings.ts";
+export {
+  captureSelectedCourseSnapshot,
+  selectCourseFromPath,
+  selectLoadedCourse,
+  type CourseSelectionWarning,
+  type CourseSelectionWarningCode,
+  type ExplicitCourseSelectionResult,
+  type SelectedCourseSnapshot,
+} from "./selection.ts";
+export {
+  buildCourseSettingsModel,
+  COURSE_SETTING_ID,
+  COURSE_SETTING_LABEL,
+  createCourseSettingsComponent,
+  GOLF_SETTINGS_TITLE,
+  showCourseSettings,
+  type CourseSettingOption,
+  type CourseSettingsComponentOptions,
+  type CourseSettingsModel,
+} from "./ui.ts";
+export {
   OUT_OF_BOUNDS,
   type BoundarySegment,
   type CorridorShape,

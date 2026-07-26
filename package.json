@@ -18,6 +18,10 @@
     ".pi/extensions/golf/course-loader/course.schema.json",
     ".pi/extensions/golf/course-loader/geometry.ts",
     ".pi/extensions/golf/course-loader/index.ts",
+    ".pi/extensions/golf/course-loader/ui.ts",
+    ".pi/extensions/golf/course-loader/settings.ts",
+    ".pi/extensions/golf/course-loader/selection.ts",
+    ".pi/extensions/golf/course-loader/loading.ts",
     ".pi/extensions/golf/course-loader/rasterizer.ts",
     ".pi/extensions/golf/course-loader/schema.ts",
     ".pi/extensions/golf/course-loader/types.ts",
@@ -47,6 +51,10 @@
     "vitest": "3.2.7"
   },
   "dependencies": {
+    "@earendil-works/pi-tui": "0.82.1",
     "ajv": "8.20.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.1"
   }
 }
