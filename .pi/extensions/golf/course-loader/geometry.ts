@@ -36,10 +36,14 @@ export function polygonBounds(polygon: PolygonShape): GeometryBounds {
 /** Integer cells whose centers can lie within the polygon bounding box. */
 export function rasterBounds(polygon: PolygonShape): RasterBounds {
   const bounds = polygonBounds(polygon);
-  const minX = Math.ceil(bounds.minX - 0.5);
-  const minY = Math.ceil(bounds.minY - 0.5);
-  const maxX = Math.floor(bounds.maxX - 0.5);
-  const maxY = Math.floor(bounds.maxY - 0.5);
+  const rawMinX = Math.ceil(bounds.minX - 0.5);
+  const rawMinY = Math.ceil(bounds.minY - 0.5);
+  const rawMaxX = Math.floor(bounds.maxX - 0.5);
+  const rawMaxY = Math.floor(bounds.maxY - 0.5);
+  const minX = Object.is(rawMinX, -0) ? 0 : rawMinX;
+  const minY = Object.is(rawMinY, -0) ? 0 : rawMinY;
+  const maxX = Object.is(rawMaxX, -0) ? 0 : rawMaxX;
+  const maxY = Object.is(rawMaxY, -0) ? 0 : rawMaxY;
   return {
     minX,
     minY,

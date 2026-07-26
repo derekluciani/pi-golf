@@ -1,4 +1,4 @@
-import { Ajv2020 } from "ajv/dist/2020.js";
+import { Ajv2020, type ErrorObject } from "ajv/dist/2020.js";
 
 import { TERRAINS, type Terrain } from "../domain/index.ts";
 import {
@@ -11,24 +11,20 @@ import {
   shapeContainsPoint,
 } from "./geometry.ts";
 import {
-  COURSE_REQUIRED_PROPERTIES,
   COURSE_SCHEMA,
-  COURSE_SCHEMA_VERSION,
-  HOLE_REQUIRED_PROPERTIES,
   MAX_BOUNDARY_EXTENT,
-  MAX_HOLES,
-  REGION_REQUIRED_PROPERTIES,
+  MAX_GEOMETRY_MAGNITUDE,
   SHAPE_TYPES,
 } from "./schema.ts";
 import {
   OUT_OF_BOUNDS,
   type CorridorShape,
+  type Course,
   type CourseDiagnostic,
   type CourseDiagnosticCode,
   type CourseHole,
   type CourseValidationResult,
   type CourseWarning,
-  type EllipseShape,
   type Point,
   type PolygonShape,
   type RasterTerrain,
@@ -39,17 +35,27 @@ import {
 const validateStructureAgainstCourseSchema = new Ajv2020({
   allErrors: true,
   strict: true,
-}).compile(COURSE_SCHEMA);
+  verbose: true,
+}).compile<Course>(COURSE_SCHEMA);
 
-/** Structural-only validation compiled directly from the authoritative Course schema. */
+/** Structural-only acceptance compiled directly from the authoritative Course schema. */
 export function validateCourseStructure(input: unknown): boolean {
   return validateStructureAgainstCourseSchema(input);
 }
 
 type UnknownRecord = Record<string, unknown>;
+type ShapeType = (typeof SHAPE_TYPES)[number];
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isShapeType(value: unknown): value is ShapeType {
+  return typeof value === "string" && SHAPE_TYPES.some((type) => type === value);
+}
+
+function isTerrain(value: unknown): value is Terrain {
+  return typeof value === "string" && TERRAINS.some((terrain) => terrain === value);
 }
 
 function propertyPath(path: string, property: string): string {
@@ -58,398 +64,311 @@ function propertyPath(path: string, property: string): string {
     : `${path}[${JSON.stringify(property)}]`;
 }
 
-function addError(
-  errors: CourseDiagnostic[],
-  path: string,
-  code: CourseDiagnosticCode,
-  message: string,
-): void {
-  errors.push({ path, code, message });
+function decodePointerSegment(segment: string): string {
+  return segment.replaceAll("~1", "/").replaceAll("~0", "~");
 }
 
-function inspectObject(
-  value: unknown,
-  path: string,
-  allowed: readonly string[],
-  required: readonly string[],
-  errors: CourseDiagnostic[],
-): UnknownRecord | undefined {
-  if (!isRecord(value)) {
-    addError(errors, path, "invalid-object", "Expected an object.");
-    return undefined;
-  }
+function pointerSegments(pointer: string): readonly string[] {
+  if (pointer === "") return [];
+  return pointer.slice(1).split("/").map(decodePointerSegment);
+}
 
-  const allowedProperties = new Set(allowed);
-  for (const property of Object.keys(value)) {
-    if (!allowedProperties.has(property)) {
-      addError(
-        errors,
-        propertyPath(path, property),
-        "additional-property",
-        `Property '${property}' is not supported.`,
-      );
-    }
-  }
-  for (const property of required) {
-    if (!Object.hasOwn(value, property)) {
-      addError(
-        errors,
-        propertyPath(path, property),
-        "missing-property",
-        `Required property '${property}' is missing.`,
-      );
+function pointerToJsonPath(pointer: string): string {
+  return pointerSegments(pointer).reduce(
+    (path, segment) => /^\d+$/u.test(segment) ? `${path}[${segment}]` : propertyPath(path, segment),
+    "$",
+  );
+}
+
+function valueAtPointer(input: unknown, pointer: string): unknown {
+  let value = input;
+  for (const segment of pointerSegments(pointer)) {
+    if (Array.isArray(value) && /^\d+$/u.test(segment)) {
+      value = value[Number(segment)];
+    } else if (isRecord(value)) {
+      value = value[segment];
+    } else {
+      return undefined;
     }
   }
   return value;
 }
 
-function parseNonBlankString(
-  value: unknown,
-  path: string,
-  code: "invalid-id" | "invalid-name",
-  errors: CourseDiagnostic[],
-): string | undefined {
-  if (typeof value !== "string" || !/\S/u.test(value)) {
-    addError(errors, path, code, "Expected a non-blank string.");
-    return undefined;
-  }
-  return value;
+function isSparseArrayEntry(input: unknown, pointer: string): boolean {
+  const segments = pointerSegments(pointer);
+  const indexSegment = segments.at(-1);
+  if (indexSegment === undefined || !/^\d+$/u.test(indexSegment)) return false;
+  const parentPointer = segments.length === 1
+    ? ""
+    : `/${segments.slice(0, -1).map((segment) => segment.replaceAll("~", "~0").replaceAll("/", "~1")).join("/")}`;
+  const parent = valueAtPointer(input, parentPointer);
+  return Array.isArray(parent) && !Object.hasOwn(parent, Number(indexSegment));
 }
 
-function parseCoordinate(
-  value: unknown,
-  path: string,
-  errors: CourseDiagnostic[],
-): number | undefined {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    addError(errors, path, "invalid-coordinate", "Expected a finite coordinate.");
-    return undefined;
-  }
-  return value;
+const shapeSchemaOwners = new WeakMap<object, ShapeType>();
+const polygonSchema = COURSE_SCHEMA.$defs.polygon;
+const ellipseSchema = COURSE_SCHEMA.$defs.ellipse;
+const corridorSchema = COURSE_SCHEMA.$defs.corridor;
+shapeSchemaOwners.set(polygonSchema, "polygon");
+shapeSchemaOwners.set(polygonSchema.properties.points, "polygon");
+shapeSchemaOwners.set(ellipseSchema, "ellipse");
+shapeSchemaOwners.set(corridorSchema, "corridor");
+shapeSchemaOwners.set(corridorSchema.properties.points, "corridor");
+
+const shapeProperties = new Set(["type", "points", "center", "radiusX", "radiusY", "width"]);
+const propertiesByShape: Readonly<Record<ShapeType, ReadonlySet<string>>> = {
+  polygon: new Set(["type", "points"]),
+  ellipse: new Set(["type", "center", "radiusX", "radiusY"]),
+  corridor: new Set(["type", "points", "width"]),
+};
+
+function shapeRootPointer(instancePath: string): string | undefined {
+  const match = /^(.*\/regions\/\d+\/shape)(?:\/.*)?$/u.exec(instancePath);
+  return match?.[1];
 }
 
-function parsePoint(
-  value: unknown,
-  path: string,
-  errors: CourseDiagnostic[],
-): Point | undefined {
-  const record = inspectObject(value, path, ["x", "y"], ["x", "y"], errors);
-  if (record === undefined) return undefined;
-  const x = Object.hasOwn(record, "x") ? parseCoordinate(record.x, `${path}.x`, errors) : undefined;
-  const y = Object.hasOwn(record, "y") ? parseCoordinate(record.y, `${path}.y`, errors) : undefined;
-  return x === undefined || y === undefined ? undefined : { x, y };
-}
+/**
+ * Ajv evaluates every `oneOf` branch. Keep the selected branch, or only common
+ * independently meaningful failures when no supported discriminator is present.
+ */
+function isRelevantStructuralError(input: unknown, error: ErrorObject): boolean {
+  const shapeRoot = shapeRootPointer(error.instancePath);
+  if (shapeRoot === undefined) return true;
+  if (error.keyword === "oneOf") return false;
 
-function parseArrayItems<T>(
-  value: unknown,
-  path: string,
-  expected: string,
-  parseItem: (item: unknown, itemPath: string, errors: CourseDiagnostic[]) => T | undefined,
-  errors: CourseDiagnostic[],
-): readonly (T | undefined)[] | undefined {
-  if (!Array.isArray(value)) {
-    addError(errors, path, "invalid-array", expected);
-    return undefined;
+  const shape = valueAtPointer(input, shapeRoot);
+  if (!isRecord(shape)) {
+    return error.keyword === "type" && error.instancePath === shapeRoot;
   }
 
-  const parsed: (T | undefined)[] = [];
+  const declaredType = shape.type;
+  const owner = isRecord(error.parentSchema)
+    ? shapeSchemaOwners.get(error.parentSchema)
+    : undefined;
+
+  if (isShapeType(declaredType)) {
+    if (error.keyword === "const" && error.instancePath === `${shapeRoot}/type`) return false;
+    const nestedPath = error.instancePath.slice(shapeRoot.length + 1);
+    const firstProperty = nestedPath.split("/", 1)[0];
+    if (firstProperty !== undefined && firstProperty !== ""
+      && !propertiesByShape[declaredType].has(decodePointerSegment(firstProperty))) return false;
+    return owner === undefined || owner === declaredType;
+  }
+
+  if (error.keyword === "const" && error.instancePath === `${shapeRoot}/type`) return true;
+  if (error.keyword === "required") {
+    return error.params["missingProperty"] === "type";
+  }
+  if (error.keyword === "additionalProperties") {
+    const property = error.params["additionalProperty"];
+    return typeof property === "string" && !shapeProperties.has(property);
+  }
+  return false;
+}
+
+function diagnosticCode(input: unknown, error: ErrorObject, path: string): CourseDiagnosticCode {
+  const lastProperty = /\.([A-Za-z_$][A-Za-z0-9_$]*)$/u.exec(path)?.[1];
+  switch (error.keyword) {
+    case "required":
+      return "missing-property";
+    case "additionalProperties":
+      return "additional-property";
+    case "const":
+      return path === "$.schemaVersion" ? "invalid-schema-version" : "unsupported-shape";
+    case "enum":
+      return "unsupported-terrain";
+    case "minLength":
+    case "pattern":
+      return lastProperty === "name" ? "invalid-name" : "invalid-id";
+    case "minItems":
+    case "maxItems":
+      if (path === "$.holes") return "invalid-hole-count";
+      return valueAtPointer(input, error.instancePath.replace(/\/points$/u, "") + "/type") === "corridor"
+        ? "invalid-corridor"
+        : "invalid-polygon";
+    case "exclusiveMinimum":
+      return lastProperty === "width" ? "invalid-corridor" : "invalid-ellipse";
+    case "minimum":
+    case "maximum":
+      if (lastProperty === "x" || lastProperty === "y") return "invalid-coordinate";
+      if (lastProperty === "width") return "invalid-corridor";
+      if (lastProperty === "radiusX" || lastProperty === "radiusY") return "invalid-ellipse";
+      return lastProperty === "par" ? "invalid-par" : "invalid-number";
+    case "type": {
+      const expected = error.params["type"];
+      if (expected === "object") {
+        return isSparseArrayEntry(input, error.instancePath) ? "invalid-array" : "invalid-object";
+      }
+      if (expected === "array") return "invalid-array";
+      if (lastProperty === "x" || lastProperty === "y") return "invalid-coordinate";
+      if (lastProperty === "width") return "invalid-corridor";
+      if (lastProperty === "radiusX" || lastProperty === "radiusY") return "invalid-ellipse";
+      if (lastProperty === "terrain") return "unsupported-terrain";
+      if (lastProperty === "type") return "unsupported-shape";
+      if (lastProperty === "id") return "invalid-id";
+      if (lastProperty === "name") return "invalid-name";
+      if (lastProperty === "par") return "invalid-par";
+      return expected === "integer" ? "invalid-number" : "invalid-string";
+    }
+    default:
+      return "invalid-object";
+  }
+}
+
+function diagnosticMessage(code: CourseDiagnosticCode, path: string): string {
+  switch (code) {
+    case "additional-property": return `Property at ${path} is not supported.`;
+    case "invalid-coordinate": return `Coordinates must be finite and within inclusive [-${MAX_GEOMETRY_MAGNITUDE}, ${MAX_GEOMETRY_MAGNITUDE}].`;
+    case "invalid-corridor": return `Corridor geometry must be valid and width must be > 0 and <= ${MAX_GEOMETRY_MAGNITUDE}.`;
+    case "invalid-ellipse": return `Ellipse radii must be > 0 and <= ${MAX_GEOMETRY_MAGNITUDE}.`;
+    case "invalid-hole-count": return "A Course must contain between 1 and 18 Holes.";
+    case "invalid-id": return "Expected a non-blank ID string.";
+    case "invalid-name": return "Expected a non-blank Course name.";
+    case "invalid-number": return "Hole number must be an integer from 1 through 18.";
+    case "invalid-object": return "Expected an object matching the version 1 Course schema.";
+    case "invalid-par": return "Par must be 3, 4, or 5.";
+    case "invalid-polygon": return "A polygon requires at least three valid vertices.";
+    case "invalid-schema-version": return "Only schemaVersion 1 is supported.";
+    case "invalid-string": return "Expected a string.";
+    case "invalid-array": return "Expected a dense array of schema-valid entries.";
+    case "missing-property": return `Required property at ${path} is missing.`;
+    case "unsupported-shape": return "Unsupported shape type.";
+    case "unsupported-terrain": return "Unsupported Terrain value.";
+    default: return "Course validation failed.";
+  }
+}
+
+function normalizeStructuralErrors(input: unknown, ajvErrors: readonly ErrorObject[]): CourseDiagnostic[] {
+  const diagnostics: CourseDiagnostic[] = [];
+  for (const error of ajvErrors) {
+    if (!isRelevantStructuralError(input, error)) continue;
+    let path = pointerToJsonPath(error.instancePath);
+    if (error.keyword === "required") {
+      const property = error.params["missingProperty"];
+      if (typeof property === "string") path = propertyPath(path, property);
+    } else if (error.keyword === "additionalProperties") {
+      const property = error.params["additionalProperty"];
+      if (typeof property === "string") path = propertyPath(path, property);
+    }
+    const code = diagnosticCode(input, error, path);
+    diagnostics.push({ path, code, message: diagnosticMessage(code, path) });
+  }
+  return diagnostics;
+}
+
+function usableCoordinate(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value)
+    && value >= -MAX_GEOMETRY_MAGNITUDE && value <= MAX_GEOMETRY_MAGNITUDE;
+}
+
+function usablePoint(value: unknown): Point | undefined {
+  if (!isRecord(value) || !usableCoordinate(value.x) || !usableCoordinate(value.y)) return undefined;
+  return { x: value.x, y: value.y };
+}
+
+function usablePoints(value: unknown): readonly Point[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const points: Point[] = [];
   for (let index = 0; index < value.length; index += 1) {
-    const itemPath = `${path}[${index}]`;
-    if (!Object.hasOwn(value, index)) {
-      addError(errors, itemPath, "invalid-array", "Sparse array entries are not supported.");
-      parsed.push(undefined);
-      continue;
-    }
-    parsed.push(parseItem(value[index], itemPath, errors));
+    if (!Object.hasOwn(value, index)) return undefined;
+    const point = usablePoint(value[index]);
+    if (point === undefined) return undefined;
+    points.push(point);
   }
-  return parsed;
+  return points;
 }
 
-function parsePoints(
-  value: unknown,
-  path: string,
-  errors: CourseDiagnostic[],
-): readonly Point[] | undefined {
-  const parsed = parseArrayItems(
-    value,
-    path,
-    "Expected an array of points.",
-    parsePoint,
-    errors,
-  );
-  return parsed !== undefined && parsed.every((point): point is Point => point !== undefined)
-    ? parsed
-    : undefined;
+function usablePositiveDimension(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value)
+    && value > 0 && value <= MAX_GEOMETRY_MAGNITUDE;
 }
 
-function parsePolygon(
-  value: unknown,
-  path: string,
-  errors: CourseDiagnostic[],
-): PolygonShape | undefined {
-  const record = inspectObject(value, path, ["type", "points"], ["type", "points"], errors);
-  if (record === undefined) return undefined;
-
-  let validType = false;
-  if (Object.hasOwn(record, "type")) {
-    validType = record.type === "polygon";
-    if (!validType) {
-      addError(errors, `${path}.type`, "unsupported-shape", "Expected shape type 'polygon'.");
-    }
-  }
-  const points = Object.hasOwn(record, "points")
-    ? parsePoints(record.points, `${path}.points`, errors)
-    : undefined;
-  if (!validType || points === undefined) return undefined;
-
-  const polygon: PolygonShape = { type: "polygon", points };
-  if (!isValidPolygon(polygon)) {
-    addError(
-      errors,
-      path,
-      "invalid-polygon",
-      "A polygon requires at least three vertices, non-zero area, and no self-intersections.",
-    );
-    return undefined;
-  }
-  return polygon;
-}
-
-function parsePositiveDimension(
-  value: unknown,
-  path: string,
-  code: "invalid-corridor" | "invalid-ellipse",
-  errors: CourseDiagnostic[],
-): number | undefined {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    addError(errors, path, code, "Expected a finite dimension greater than zero.");
-    return undefined;
-  }
-  return value;
-}
-
-function parseEllipse(
-  record: UnknownRecord,
-  path: string,
-  errors: CourseDiagnostic[],
-): EllipseShape | undefined {
-  inspectObject(
-    record,
-    path,
-    ["type", "center", "radiusX", "radiusY"],
-    ["type", "center", "radiusX", "radiusY"],
-    errors,
-  );
-  const center = Object.hasOwn(record, "center")
-    ? parsePoint(record.center, `${path}.center`, errors)
-    : undefined;
-  const radiusX = Object.hasOwn(record, "radiusX")
-    ? parsePositiveDimension(record.radiusX, `${path}.radiusX`, "invalid-ellipse", errors)
-    : undefined;
-  const radiusY = Object.hasOwn(record, "radiusY")
-    ? parsePositiveDimension(record.radiusY, `${path}.radiusY`, "invalid-ellipse", errors)
-    : undefined;
-  return center === undefined || radiusX === undefined || radiusY === undefined
-    ? undefined
-    : { type: "ellipse", center, radiusX, radiusY };
-}
-
-function parseCorridor(
-  record: UnknownRecord,
-  path: string,
-  errors: CourseDiagnostic[],
-): CorridorShape | undefined {
-  inspectObject(record, path, ["type", "points", "width"], ["type", "points", "width"], errors);
-  const points = Object.hasOwn(record, "points")
-    ? parsePoints(record.points, `${path}.points`, errors)
-    : undefined;
-  const width = Object.hasOwn(record, "width")
-    ? parsePositiveDimension(record.width, `${path}.width`, "invalid-corridor", errors)
-    : undefined;
-  if (points === undefined || width === undefined) return undefined;
-
-  const corridor: CorridorShape = { type: "corridor", points, width };
-  if (!isValidCorridor(corridor)) {
-    addError(
-      errors,
-      path,
-      "invalid-corridor",
-      "A corridor requires at least two distinct consecutive polyline points and positive width.",
-    );
-    return undefined;
-  }
-  return corridor;
-}
-
-function parseShape(
+function semanticShape(
   value: unknown,
   path: string,
   errors: CourseDiagnostic[],
 ): RegionShape | undefined {
-  if (!isRecord(value)) {
-    addError(errors, path, "invalid-object", "Expected a shape object.");
-    return undefined;
-  }
-  if (!Object.hasOwn(value, "type")) {
-    addError(errors, `${path}.type`, "missing-property", "Required property 'type' is missing.");
-    return undefined;
-  }
-  if (typeof value.type !== "string" || !SHAPE_TYPES.some((type) => type === value.type)) {
-    addError(errors, `${path}.type`, "unsupported-shape", "Unsupported shape type.");
-    return undefined;
-  }
-
+  if (!isRecord(value) || !isShapeType(value.type)) return undefined;
   switch (value.type) {
-    case "polygon":
-      return parsePolygon(value, path, errors);
-    case "ellipse":
-      return parseEllipse(value, path, errors);
-    case "corridor":
-      return parseCorridor(value, path, errors);
+    case "polygon": {
+      const points = usablePoints(value.points);
+      if (points === undefined) return undefined;
+      const polygon: PolygonShape = { type: "polygon", points };
+      if (points.length >= 3 && !isValidPolygon(polygon)) {
+        errors.push({ path, code: "invalid-polygon", message: "Polygon vertices must have non-zero area and no self-intersections." });
+        return undefined;
+      }
+      return polygon;
+    }
+    case "ellipse": {
+      const center = usablePoint(value.center);
+      if (center === undefined || !usablePositiveDimension(value.radiusX)
+        || !usablePositiveDimension(value.radiusY)) return undefined;
+      return { type: "ellipse", center, radiusX: value.radiusX, radiusY: value.radiusY };
+    }
+    case "corridor": {
+      const points = usablePoints(value.points);
+      if (points === undefined || !usablePositiveDimension(value.width)) return undefined;
+      const corridor: CorridorShape = { type: "corridor", points, width: value.width };
+      if (points.length >= 2 && !isValidCorridor(corridor)) {
+        errors.push({ path, code: "invalid-corridor", message: "Corridor points must contain distinct consecutive vertices." });
+        return undefined;
+      }
+      return corridor;
+    }
   }
 }
 
-function isTerrain(value: string): value is Terrain {
-  return TERRAINS.some((terrain) => terrain === value);
-}
-
-function parseTerrain(
+function semanticPolygon(
   value: unknown,
   path: string,
   errors: CourseDiagnostic[],
-): Terrain | undefined {
-  if (typeof value !== "string" || !isTerrain(value)) {
-    addError(errors, path, "unsupported-terrain", "Unsupported Terrain value.");
-    return undefined;
-  }
-  return value;
+): PolygonShape | undefined {
+  const shape = semanticShape(value, path, errors);
+  return shape?.type === "polygon" ? shape : undefined;
 }
 
-function parseRegion(
-  value: unknown,
-  path: string,
-  errors: CourseDiagnostic[],
-): TerrainRegion | undefined {
-  const record = inspectObject(
-    value,
-    path,
-    REGION_REQUIRED_PROPERTIES,
-    REGION_REQUIRED_PROPERTIES,
-    errors,
-  );
-  if (record === undefined) return undefined;
-  const terrain = Object.hasOwn(record, "terrain")
-    ? parseTerrain(record.terrain, `${path}.terrain`, errors)
-    : undefined;
-  const shape = Object.hasOwn(record, "shape")
-    ? parseShape(record.shape, `${path}.shape`, errors)
-    : undefined;
-  return terrain === undefined || shape === undefined ? undefined : { terrain, shape };
-}
-
-function parseRegions(
+function semanticRegions(
   value: unknown,
   path: string,
   errors: CourseDiagnostic[],
 ): readonly TerrainRegion[] | undefined {
-  const regions = parseArrayItems(
-    value,
-    path,
-    "Expected an ordered array of Terrain regions.",
-    parseRegion,
-    errors,
-  );
-  return regions !== undefined
-      && regions.every((region): region is TerrainRegion => region !== undefined)
-    ? regions
-    : undefined;
-}
-
-function parseHoleNumber(
-  value: unknown,
-  path: string,
-  errors: CourseDiagnostic[],
-): number | undefined {
-  if (!Number.isInteger(value) || typeof value !== "number" || value < 1 || value > 18) {
-    addError(errors, path, "invalid-number", "Hole number must be an integer from 1 through 18.");
-    return undefined;
+  if (!Array.isArray(value)) return undefined;
+  const regions: TerrainRegion[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.hasOwn(value, index)) return undefined;
+    const region = value[index];
+    if (!isRecord(region) || !isTerrain(region.terrain)) return undefined;
+    const shape = semanticShape(region.shape, `${path}[${index}].shape`, errors);
+    if (shape === undefined) return undefined;
+    regions.push({ terrain: region.terrain, shape });
   }
-  return value;
+  return regions;
 }
 
-function parsePar(
-  value: unknown,
-  path: string,
-  errors: CourseDiagnostic[],
-): 3 | 4 | 5 | undefined {
-  if (value !== 3 && value !== 4 && value !== 5) {
-    addError(errors, path, "invalid-par", "Par must be 3, 4, or 5.");
-    return undefined;
-  }
-  return value;
-}
-
-interface ParsedHole {
+interface PartialHole {
   readonly id: string | undefined;
   readonly number: number | undefined;
-  readonly par: 3 | 4 | 5 | undefined;
   readonly boundary: PolygonShape | undefined;
   readonly tee: Point | undefined;
   readonly cup: Point | undefined;
   readonly regions: readonly TerrainRegion[] | undefined;
 }
 
-function parseHole(
+function semanticHole(
   value: unknown,
   path: string,
   errors: CourseDiagnostic[],
-): ParsedHole | undefined {
-  const record = inspectObject(
-    value,
-    path,
-    HOLE_REQUIRED_PROPERTIES,
-    HOLE_REQUIRED_PROPERTIES,
-    errors,
-  );
-  if (record === undefined) return undefined;
-
+): PartialHole | undefined {
+  if (!isRecord(value)) return undefined;
   return {
-    id: Object.hasOwn(record, "id")
-      ? parseNonBlankString(record.id, `${path}.id`, "invalid-id", errors)
-      : undefined,
-    number: Object.hasOwn(record, "number")
-      ? parseHoleNumber(record.number, `${path}.number`, errors)
-      : undefined,
-    par: Object.hasOwn(record, "par")
-      ? parsePar(record.par, `${path}.par`, errors)
-      : undefined,
-    boundary: Object.hasOwn(record, "boundary")
-      ? parsePolygon(record.boundary, `${path}.boundary`, errors)
-      : undefined,
-    tee: Object.hasOwn(record, "tee")
-      ? parsePoint(record.tee, `${path}.tee`, errors)
-      : undefined,
-    cup: Object.hasOwn(record, "cup")
-      ? parsePoint(record.cup, `${path}.cup`, errors)
-      : undefined,
-    regions: Object.hasOwn(record, "regions")
-      ? parseRegions(record.regions, `${path}.regions`, errors)
-      : undefined,
-  };
-}
-
-function completeHole(hole: ParsedHole | undefined): CourseHole | undefined {
-  if (hole === undefined || hole.id === undefined || hole.number === undefined
-    || hole.par === undefined || hole.boundary === undefined || hole.tee === undefined
-    || hole.cup === undefined || hole.regions === undefined) return undefined;
-  return {
-    id: hole.id,
-    number: hole.number,
-    par: hole.par,
-    boundary: hole.boundary,
-    tee: hole.tee,
-    cup: hole.cup,
-    regions: hole.regions,
+    id: typeof value.id === "string" && /\S/u.test(value.id) ? value.id : undefined,
+    number: typeof value.number === "number" && Number.isInteger(value.number)
+      && value.number >= 1 && value.number <= 18 ? value.number : undefined,
+    boundary: semanticPolygon(value.boundary, `${path}.boundary`, errors),
+    tee: usablePoint(value.tee),
+    cup: usablePoint(value.cup),
+    regions: semanticRegions(value.regions, `${path}.regions`, errors),
   };
 }
 
@@ -473,57 +392,48 @@ export function terrainAtPoint(hole: CourseHole, point: Point): RasterTerrain {
 
 function regionAffectsCell(boundary: PolygonShape, region: TerrainRegion): boolean {
   const bounds = rasterBounds(boundary);
-  // Offset counters remain bounded even when an absolute coordinate cannot advance by one.
   for (let rowOffset = 0; rowOffset < bounds.height; rowOffset += 1) {
     for (let columnOffset = 0; columnOffset < bounds.width; columnOffset += 1) {
       const center = rasterCellCenter(bounds, columnOffset, rowOffset);
-      if (polygonContainsPoint(boundary, center)
-        && shapeContainsPoint(region.shape, center)) return true;
+      if (polygonContainsPoint(boundary, center) && shapeContainsPoint(region.shape, center)) return true;
     }
   }
   return false;
 }
 
 function validateHoleGeometry(
-  hole: ParsedHole,
+  hole: PartialHole,
   path: string,
   errors: CourseDiagnostic[],
   warnings: CourseWarning[],
 ): void {
   const boundary = hole.boundary;
   if (boundary === undefined) return;
-
   const bounds = polygonBounds(boundary);
   const boundaryTooLarge = bounds.maxX - bounds.minX > MAX_BOUNDARY_EXTENT
     || bounds.maxY - bounds.minY > MAX_BOUNDARY_EXTENT;
   if (boundaryTooLarge) {
-    addError(
-      errors,
-      `${path}.boundary`,
-      "boundary-too-large",
-      `Course Boundary bounding boxes may not exceed ${MAX_BOUNDARY_EXTENT} × ${MAX_BOUNDARY_EXTENT} units.`,
-    );
+    errors.push({
+      path: `${path}.boundary`,
+      code: "boundary-too-large",
+      message: `Course Boundary bounding boxes may not exceed ${MAX_BOUNDARY_EXTENT} × ${MAX_BOUNDARY_EXTENT} units.`,
+    });
   }
 
-  const points = [
-    { name: "tee", point: hole.tee },
-    { name: "cup", point: hole.cup },
-  ] as const;
-  for (const entry of points) {
+  for (const entry of [{ name: "tee", point: hole.tee }, { name: "cup", point: hole.cup }] as const) {
     if (entry.point === undefined) continue;
     const pointPath = `${path}.${entry.name}`;
     if (!polygonContainsPoint(boundary, entry.point)) {
-      addError(errors, pointPath, "point-outside-boundary", `${entry.name} must be inside the Course Boundary.`);
+      errors.push({ path: pointPath, code: "point-outside-boundary", message: `${entry.name} must be inside the Course Boundary.` });
       continue;
     }
     if (hole.regions === undefined) continue;
-
     const terrain = terrainAtGeometry(boundary, hole.regions, entry.point);
     if (terrain === "water" || terrain === "bunker") {
-      addError(errors, pointPath, "point-on-hazard", `${entry.name} may not resolve to ${terrain}.`);
+      errors.push({ path: pointPath, code: "point-on-hazard", message: `${entry.name} may not resolve to ${terrain}.` });
     }
     if (entry.name === "cup" && terrain !== "green") {
-      addError(errors, pointPath, "cup-not-green", "Cup must resolve to Green after region layering.");
+      errors.push({ path: pointPath, code: "cup-not-green", message: "Cup must resolve to Green after region layering." });
     }
   }
 
@@ -539,124 +449,70 @@ function validateHoleGeometry(
   });
 }
 
-interface IndexedHole {
-  readonly hole: ParsedHole;
-  readonly index: number;
-}
-
-function reportDuplicates(holes: readonly IndexedHole[], errors: CourseDiagnostic[]): void {
+function reportDuplicates(holes: readonly { readonly hole: PartialHole; readonly index: number }[], errors: CourseDiagnostic[]): void {
   const ids = new Map<string, number>();
   const numbers = new Map<number, number>();
-  holes.forEach(({ hole, index }) => {
+  for (const { hole, index } of holes) {
     if (hole.id !== undefined) {
-      const priorId = ids.get(hole.id);
-      if (priorId === undefined) ids.set(hole.id, index);
-      else addError(
-        errors,
-        `$.holes[${index}].id`,
-        "duplicate-hole-id",
-        `Hole ID duplicates $.holes[${priorId}].id.`,
-      );
+      const prior = ids.get(hole.id);
+      if (prior === undefined) ids.set(hole.id, index);
+      else errors.push({ path: `$.holes[${index}].id`, code: "duplicate-hole-id", message: `Hole ID duplicates $.holes[${prior}].id.` });
     }
-
     if (hole.number !== undefined) {
-      const priorNumber = numbers.get(hole.number);
-      if (priorNumber === undefined) numbers.set(hole.number, index);
-      else addError(
-        errors,
-        `$.holes[${index}].number`,
-        "duplicate-hole-number",
-        `Hole number duplicates $.holes[${priorNumber}].number.`,
-      );
+      const prior = numbers.get(hole.number);
+      if (prior === undefined) numbers.set(hole.number, index);
+      else errors.push({ path: `$.holes[${index}].number`, code: "duplicate-hole-number", message: `Hole number duplicates $.holes[${prior}].number.` });
     }
-  });
+  }
+}
+
+function semanticDiagnostics(input: unknown): { errors: CourseDiagnostic[]; warnings: CourseWarning[] } {
+  const errors: CourseDiagnostic[] = [];
+  const warnings: CourseWarning[] = [];
+  if (!isRecord(input) || !Array.isArray(input.holes)) return { errors, warnings };
+
+  const holes: { hole: PartialHole; index: number }[] = [];
+  for (let index = 0; index < input.holes.length; index += 1) {
+    if (!Object.hasOwn(input.holes, index)) continue;
+    const hole = semanticHole(input.holes[index], `$.holes[${index}]`, errors);
+    if (hole !== undefined) holes.push({ hole, index });
+  }
+  reportDuplicates(holes, errors);
+  for (const { hole, index } of holes) validateHoleGeometry(hole, `$.holes[${index}]`, errors, warnings);
+  return { errors, warnings };
+}
+
+function mergeDiagnostics(...groups: readonly (readonly CourseDiagnostic[])[]): CourseDiagnostic[] {
+  const diagnostics = new Map<string, CourseDiagnostic>();
+  for (const group of groups) {
+    for (const diagnostic of group) {
+      const key = `${diagnostic.path}\u0000${diagnostic.code}`;
+      if (!diagnostics.has(key)) diagnostics.set(key, diagnostic);
+    }
+  }
+  const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
+  return [...diagnostics.values()].sort((left, right) =>
+    compare(left.path, right.path) || compare(left.code, right.code));
 }
 
 /**
- * Parses untrusted input without coercion or repair and reports every
- * independently discoverable validation failure with a JSONPath.
+ * Validates untrusted input without coercion or repair. Ajv is the sole source
+ * of structural acceptance/diagnostics; the second pass adds only semantic rules.
  */
 export function validateCourse(input: unknown): CourseValidationResult {
-  const structurallyValid = validateCourseStructure(input);
-  const errors: CourseDiagnostic[] = [];
-  const warnings: CourseWarning[] = [];
-  const record = inspectObject(
+  let course: Course | undefined;
+  if (validateStructureAgainstCourseSchema(input)) course = input;
+  const structural = normalizeStructuralErrors(
     input,
-    "$",
-    COURSE_REQUIRED_PROPERTIES,
-    COURSE_REQUIRED_PROPERTIES,
-    errors,
+    [...(validateStructureAgainstCourseSchema.errors ?? [])],
   );
-  if (record === undefined) return { ok: false, errors, warnings };
+  const semantic = semanticDiagnostics(input);
+  const errors = mergeDiagnostics(structural, semantic.errors);
 
-  let schemaVersion: 1 | undefined;
-  if (Object.hasOwn(record, "schemaVersion")) {
-    if (record.schemaVersion === COURSE_SCHEMA_VERSION) schemaVersion = COURSE_SCHEMA_VERSION;
-    else addError(
-      errors,
-      "$.schemaVersion",
-      "invalid-schema-version",
-      `Only schemaVersion ${COURSE_SCHEMA_VERSION} is supported.`,
-    );
+  if (course === undefined || errors.length > 0) {
+    return { ok: false, errors, warnings: semantic.warnings };
   }
-  const id = Object.hasOwn(record, "id")
-    ? parseNonBlankString(record.id, "$.id", "invalid-id", errors)
-    : undefined;
-  const name = Object.hasOwn(record, "name")
-    ? parseNonBlankString(record.name, "$.name", "invalid-name", errors)
-    : undefined;
-
-  let holes: readonly CourseHole[] | undefined;
-  if (Object.hasOwn(record, "holes")) {
-    if (!Array.isArray(record.holes)) {
-      addError(errors, "$.holes", "invalid-array", "Expected an ordered array of Holes.");
-    } else {
-      if (record.holes.length < 1 || record.holes.length > MAX_HOLES) {
-        addError(
-          errors,
-          "$.holes",
-          "invalid-hole-count",
-          `A Course must contain between 1 and ${MAX_HOLES} Holes.`,
-        );
-      }
-      const parsedHoles = parseArrayItems(
-        record.holes,
-        "$.holes",
-        "Expected an ordered array of Holes.",
-        parseHole,
-        errors,
-      ) ?? [];
-      const indexedHoles: IndexedHole[] = [];
-      parsedHoles.forEach((hole, index) => {
-        if (hole !== undefined) indexedHoles.push({ hole, index });
-      });
-      reportDuplicates(indexedHoles, errors);
-      indexedHoles.forEach(({ hole, index }) => {
-        validateHoleGeometry(hole, `$.holes[${index}]`, errors, warnings);
-      });
-      const completeHoles = parsedHoles.map(completeHole);
-      if (completeHoles.every((hole): hole is CourseHole => hole !== undefined)) {
-        holes = completeHoles;
-      }
-    }
-  }
-
-  // The path-aware parser mirrors schema diagnostics. This fallback guards future
-  // parser drift while schema acceptance remains the structural source of truth.
-  if (!structurallyValid && errors.length === 0) {
-    addError(errors, "$", "invalid-object", "Course does not match the version 1 structural schema.");
-  }
-
-  if (!structurallyValid || errors.length > 0 || schemaVersion === undefined || id === undefined
-    || name === undefined || holes === undefined) {
-    return { ok: false, errors, warnings };
-  }
-  return {
-    ok: true,
-    value: { schemaVersion, id, name, holes },
-    errors: [],
-    warnings,
-  };
+  return { ok: true, value: course, errors: [], warnings: semantic.warnings };
 }
 
 /** Alias emphasizing that successful validation also narrows unknown input. */

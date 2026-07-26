@@ -1,9 +1,7 @@
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_GEOMETRY_MAGNITUDE,
   OUT_OF_BOUNDS,
   calculateHoleLength,
   rasterizeHole,
@@ -184,21 +182,62 @@ describe("deterministic Terrain rasterization", () => {
     expect(first.equals(second)).toBe(true);
   });
 
-  it("completes validation and repeated rasterization at a large finite offset", () => {
-    const viteNodePath = fileURLToPath(
-      new URL("../../../../node_modules/vite-node/vite-node.mjs", import.meta.url),
-    );
-    const probePath = fileURLToPath(new URL("./large-offset.probe.ts", import.meta.url));
-    const probe = spawnSync(
-      process.execPath,
-      [viteNodePath, "--script", probePath],
-      { encoding: "utf8", timeout: 5_000 },
-    );
+  it("rasterizes exact 8 × 8 cells near both valid coordinate limits", () => {
+    for (const origin of [MAX_GEOMETRY_MAGNITUDE - 8, -MAX_GEOMETRY_MAGNITUDE]) {
+      const result = validateCourse({
+        schemaVersion: 1,
+        id: `limit-${origin}`,
+        name: "Limit Course",
+        holes: [{
+          id: "limit-hole",
+          number: 1,
+          par: 3,
+          boundary: {
+            type: "polygon",
+            points: [
+              { x: origin, y: 0 },
+              { x: origin + 8, y: 0 },
+              { x: origin + 8, y: 8 },
+              { x: origin, y: 8 },
+            ],
+          },
+          tee: { x: origin + 0.5, y: 0.5 },
+          cup: { x: origin + 7.5, y: 7.5 },
+          regions: [{
+            terrain: "green",
+            shape: {
+              type: "polygon",
+              points: [
+                { x: origin + 4, y: 0 },
+                { x: origin + 8, y: 0 },
+                { x: origin + 8, y: 8 },
+                { x: origin + 4, y: 8 },
+              ],
+            },
+          }],
+        }],
+      });
+      if (!result.ok) throw new Error(JSON.stringify(result.errors));
+      const hole = result.value.holes[0];
+      if (hole === undefined) throw new Error("Missing limit Hole.");
 
-    expect(probe.error, probe.stderr).toBeUndefined();
-    expect(probe.signal, probe.stderr).toBeNull();
-    expect(probe.status, probe.stderr).toBe(0);
-    expect(Number(probe.stdout.trim())).toBeGreaterThan(0);
+      const first = rasterizeHole(hole);
+      const second = rasterizeHole(hole);
+      expect(first.bounds).toEqual({
+        minX: origin,
+        minY: 0,
+        maxX: origin + 7,
+        maxY: 7,
+        width: 8,
+        height: 8,
+      });
+      expect(first.cells).toHaveLength(64);
+      expect(first.cells.filter((terrain) => terrain === "rough")).toHaveLength(32);
+      expect(first.cells.filter((terrain) => terrain === "green")).toHaveLength(32);
+      expect(terrainAtCell(first, origin + 3, 4)).toBe("rough");
+      expect(terrainAtCell(first, origin + 4, 4)).toBe("green");
+      expect(Buffer.from(JSON.stringify(first)).equals(Buffer.from(JSON.stringify(second)))).toBe(true);
+    }
   });
 
   it("calculates display Length instead of reading a declared value", () => {

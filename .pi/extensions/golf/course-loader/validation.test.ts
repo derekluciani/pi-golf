@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { validateCourse, type CourseValidationResult } from "./index.ts";
+import { MAX_GEOMETRY_MAGNITUDE, validateCourse, type CourseValidationResult } from "./index.ts";
 
 interface MutablePoint {
   x: number;
@@ -238,12 +238,12 @@ describe("blocking Course validation", () => {
     const duplicate = makeHole(1);
 
     const result = expectInvalid(makeCourse([partial, duplicate]));
-    expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual([
+    expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual(expect.arrayContaining([
       { path: "$.holes[0].par", code: "invalid-par" },
       { path: "$.holes[1].id", code: "duplicate-hole-id" },
       { path: "$.holes[1].number", code: "duplicate-hole-number" },
       { path: "$.holes[0].boundary", code: "boundary-too-large" },
-    ]);
+    ]));
   });
 
   it("runs every available placement check on a partially parsed Hole", () => {
@@ -253,11 +253,11 @@ describe("blocking Course validation", () => {
     partial.regions = [];
 
     const result = expectInvalid(makeCourse([partial]));
-    expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual([
+    expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual(expect.arrayContaining([
       { path: "$.holes[0].id", code: "invalid-id" },
       { path: "$.holes[0].tee", code: "point-outside-boundary" },
       { path: "$.holes[0].cup", code: "cup-not-green" },
-    ]);
+    ]));
   });
 
   it("rejects invalid par and every non-finite coordinate", () => {
@@ -271,21 +271,90 @@ describe("blocking Course validation", () => {
     ]));
   });
 
+  it("enforces the shared coordinate and dimension magnitude at exact paths", () => {
+    const coordinateHole = makeHole();
+    coordinateHole.boundary.points[0] = { x: MAX_GEOMETRY_MAGNITUDE + 1, y: 0 };
+    coordinateHole.tee.x = MAX_GEOMETRY_MAGNITUDE + 1;
+    coordinateHole.cup.y = -MAX_GEOMETRY_MAGNITUDE - 1;
+
+    const dimensionHole = makeHole();
+    dimensionHole.regions.unshift(
+      {
+        terrain: "fairway",
+        shape: {
+          type: "ellipse",
+          center: { x: -MAX_GEOMETRY_MAGNITUDE - 1, y: 2 },
+          radiusX: MAX_GEOMETRY_MAGNITUDE + 1,
+          radiusY: 1,
+        },
+      },
+      {
+        terrain: "fairway",
+        shape: {
+          type: "corridor",
+          points: [{ x: 1, y: MAX_GEOMETRY_MAGNITUDE + 1 }, { x: 2, y: 2 }],
+          width: MAX_GEOMETRY_MAGNITUDE + 1,
+        },
+      },
+    );
+
+    expect(expectInvalid(makeCourse([coordinateHole])).errors.map(({ path, code }) => ({ path, code })))
+      .toEqual(expect.arrayContaining([
+        { path: "$.holes[0].boundary.points[0].x", code: "invalid-coordinate" },
+        { path: "$.holes[0].tee.x", code: "invalid-coordinate" },
+        { path: "$.holes[0].cup.y", code: "invalid-coordinate" },
+      ]));
+    expect(expectInvalid(makeCourse([dimensionHole])).errors.map(({ path, code }) => ({ path, code })))
+      .toEqual(expect.arrayContaining([
+        { path: "$.holes[0].regions[0].shape.center.x", code: "invalid-coordinate" },
+        { path: "$.holes[0].regions[0].shape.radiusX", code: "invalid-ellipse" },
+        { path: "$.holes[0].regions[1].shape.points[0].y", code: "invalid-coordinate" },
+        { path: "$.holes[0].regions[1].shape.width", code: "invalid-corridor" },
+      ]));
+  });
+
+  it("accepts positive dimensions exactly at the shared magnitude limit", () => {
+    const hole = makeHole();
+    hole.regions = [
+      {
+        terrain: "fairway",
+        shape: {
+          type: "corridor",
+          points: [{ x: 0.5, y: 0.5 }, { x: 5.5, y: 5.5 }],
+          width: MAX_GEOMETRY_MAGNITUDE,
+        },
+      },
+      {
+        terrain: "green",
+        shape: {
+          type: "ellipse",
+          center: hole.cup,
+          radiusX: MAX_GEOMETRY_MAGNITUDE,
+          radiusY: MAX_GEOMETRY_MAGNITUDE,
+        },
+      },
+    ];
+    expect(validateCourse(makeCourse([hole])).ok).toBe(true);
+  });
+
   it("rejects short, degenerate, and self-intersecting polygons without repair", () => {
     const malformedPolygons = [
       [{ x: 0, y: 0 }, { x: 1, y: 1 }],
       [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }],
       [{ x: 0, y: 0 }, { x: 2, y: 2 }, { x: 0, y: 2 }, { x: 2, y: 0 }],
     ];
-    for (const points of malformedPolygons) {
+    malformedPolygons.forEach((points, index) => {
       const hole = makeHole();
       hole.boundary.points = points;
       const result = expectInvalid(makeCourse([hole]));
       expect(result.errors).toEqual(expect.arrayContaining([
-        expect.objectContaining({ path: "$.holes[0].boundary", code: "invalid-polygon" }),
+        expect.objectContaining({
+          path: index === 0 ? "$.holes[0].boundary.points" : "$.holes[0].boundary",
+          code: "invalid-polygon",
+        }),
       ]));
       expect(hole.boundary.points).toBe(points);
-    }
+    });
   });
 
   it("rejects non-positive ellipse radii and corridor widths or polylines", () => {
@@ -313,7 +382,7 @@ describe("blocking Course validation", () => {
       "$.holes[0].regions[0].shape.radiusX",
       "$.holes[0].regions[0].shape.radiusY",
       "$.holes[0].regions[1].shape.width",
-      "$.holes[0].regions[2].shape",
+      "$.holes[0].regions[2].shape.points",
     ]));
   });
 
@@ -365,6 +434,94 @@ describe("blocking Course validation", () => {
     ]));
   });
 
+  it("normalizes required and additional fields at every nesting level", () => {
+    const complete = makeCourse();
+    const courseLevel = { schemaVersion: 1, id: "x", holes: complete.holes, extra: true };
+
+    const baseHole = makeHole();
+    const holeWithoutBoundary = {
+      id: baseHole.id,
+      number: baseHole.number,
+      par: baseHole.par,
+      tee: baseHole.tee,
+      cup: baseHole.cup,
+      regions: baseHole.regions,
+    };
+    const holeLevel = { ...complete, holes: [{ ...holeWithoutBoundary, extra: true }] };
+
+    const regionLevel = {
+      ...complete,
+      holes: [{
+        ...makeHole(),
+        regions: [{ shape: makeHole().regions[0]?.shape, extra: true }],
+      }],
+    };
+    const shapeLevel = {
+      ...complete,
+      holes: [{
+        ...makeHole(),
+        regions: [{
+          terrain: "green",
+          shape: {
+            type: "ellipse",
+            center: { x: 5.5, y: 5.5 },
+            radiusX: 0.6,
+            foo: 1,
+          },
+        }],
+      }],
+    };
+    const pointLevel = { ...complete, holes: [{ ...makeHole(), tee: { x: 0.5, extra: true } }] };
+    const cases = [
+      { input: courseLevel, missing: "$.name", additional: "$.extra" },
+      { input: holeLevel, missing: "$.holes[0].boundary", additional: "$.holes[0].extra" },
+      { input: regionLevel, missing: "$.holes[0].regions[0].terrain", additional: "$.holes[0].regions[0].extra" },
+      { input: shapeLevel, missing: "$.holes[0].regions[0].shape.radiusY", additional: "$.holes[0].regions[0].shape.foo" },
+      { input: pointLevel, missing: "$.holes[0].tee.y", additional: "$.holes[0].tee.extra" },
+    ];
+
+    for (const testCase of cases) {
+      expect(expectInvalid(testCase.input).errors.map(({ path, code }) => ({ path, code })))
+        .toEqual(expect.arrayContaining([
+          { path: testCase.missing, code: "missing-property" },
+          { path: testCase.additional, code: "additional-property" },
+        ]));
+    }
+  });
+
+  it("filters unselected shape branches while retaining unsupported type and extras", () => {
+    const hole = {
+      ...makeHole(),
+      regions: [{ terrain: "green", shape: { type: "rectangle", foo: 1 } }],
+    };
+    const result = expectInvalid({ ...makeCourse(), holes: [hole] });
+    expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual([
+      { path: "$.holes[0].regions[0].shape.foo", code: "additional-property" },
+      { path: "$.holes[0].regions[0].shape.type", code: "unsupported-shape" },
+    ]);
+    expect(result.errors.some((error) => /(?:points|center|radius|width)/u.test(error.path))).toBe(false);
+  });
+
+  it("does not expose nested diagnostics from an unselected shape branch", () => {
+    const hole = {
+      ...makeHole(),
+      regions: [{
+        terrain: "green",
+        shape: {
+          type: "ellipse",
+          center: { x: 5.5, y: 5.5 },
+          radiusX: 0.6,
+          radiusY: 0.6,
+          points: [{}],
+        },
+      }],
+    };
+    const result = expectInvalid({ ...makeCourse(), holes: [hole] });
+    expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual([
+      { path: "$.holes[0].regions[0].shape.points", code: "additional-property" },
+    ]);
+  });
+
   it("rejects unsupported Terrain and shape types with exact JSON paths", () => {
     const hole = makeHole();
     hole.regions = [
@@ -400,6 +557,23 @@ describe("blocking Course validation", () => {
       "$.holes[0].cup",
       "$.holes[0].regions",
     ]));
+  });
+});
+
+describe("diagnostic determinism", () => {
+  it("merges structural and semantic errors deterministically without duplicate path/code pairs", () => {
+    const first = makeHole(1);
+    first.par = 9;
+    first.boundary.points = [
+      { x: 0, y: 0 }, { x: 513, y: 0 }, { x: 513, y: 6 }, { x: 0, y: 6 },
+    ];
+    const second = makeHole(1);
+    const input = makeCourse([first, second]);
+
+    const initial = expectInvalid(input).errors;
+    const repeated = expectInvalid(input).errors;
+    expect(repeated).toEqual(initial);
+    expect(new Set(initial.map(({ path, code }) => `${path}:${code}`)).size).toBe(initial.length);
   });
 });
 

@@ -15,10 +15,24 @@ export const REGION_REQUIRED_PROPERTIES = ["terrain", "shape"] as const;
 export const SHAPE_TYPES = ["polygon", "ellipse", "corridor"] as const;
 export const MAX_HOLES = 18;
 export const MAX_BOUNDARY_EXTENT = 512;
+/** Inclusive magnitude limit for every coordinate and upper limit for positive dimensions. */
+export const MAX_GEOMETRY_MAGNITUDE = 1_000_000;
+
+const coordinateSchema = {
+  type: "number",
+  minimum: -MAX_GEOMETRY_MAGNITUDE,
+  maximum: MAX_GEOMETRY_MAGNITUDE,
+} as const;
+
+const positiveDimensionSchema = {
+  type: "number",
+  exclusiveMinimum: 0,
+  maximum: MAX_GEOMETRY_MAGNITUDE,
+} as const;
 
 /**
  * Authoritative structural schema for Course JSON. Geometry and cross-field
- * constraints are enforced by the path-aware runtime validator.
+ * constraints are enforced by the path-aware semantic validator.
  */
 export const COURSE_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -44,8 +58,8 @@ export const COURSE_SCHEMA = {
       additionalProperties: false,
       required: ["x", "y"],
       properties: {
-        x: { type: "number" },
-        y: { type: "number" },
+        x: coordinateSchema,
+        y: coordinateSchema,
       },
     },
     polygon: {
@@ -68,8 +82,8 @@ export const COURSE_SCHEMA = {
       properties: {
         type: { const: "ellipse" },
         center: { $ref: "#/$defs/point" },
-        radiusX: { type: "number", exclusiveMinimum: 0 },
-        radiusY: { type: "number", exclusiveMinimum: 0 },
+        radiusX: positiveDimensionSchema,
+        radiusY: positiveDimensionSchema,
       },
     },
     corridor: {
@@ -83,7 +97,7 @@ export const COURSE_SCHEMA = {
           minItems: 2,
           items: { $ref: "#/$defs/point" },
         },
-        width: { type: "number", exclusiveMinimum: 0 },
+        width: positiveDimensionSchema,
       },
     },
     region: {
