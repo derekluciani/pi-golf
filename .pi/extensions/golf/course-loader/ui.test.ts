@@ -6,6 +6,7 @@ import {
   createCourseSettingsComponent,
   type CourseDiscoveryResult,
   type CourseSettingsComponent,
+  type SelectedCourseSnapshot,
 } from "./index.ts";
 
 beforeAll(() => {
@@ -16,6 +17,16 @@ const theme = {
   fg: (_color: string, text: string) => text,
   bold: (text: string) => text,
 } as unknown as Theme;
+
+function previewSnapshot(): SelectedCourseSnapshot {
+  return {
+    course: { schemaVersion: 1, id: "preview-course", name: "Preview Course", holes: [] },
+    sourcePath: "builtin:preview-course",
+    usedPreviewFallback: false,
+    warnings: [],
+    courseWarnings: [],
+  };
+}
 
 function discoveredCourses(...names: string[]): CourseDiscoveryResult {
   return {
@@ -76,8 +87,7 @@ function interactiveComponent(
   const model = buildCourseSettingsModel(
     "/courses",
     discoveredCourses("Alpha", "Bravo", "Charlie"),
-    "builtin:preview-course",
-    [],
+    previewSnapshot(),
   );
   const persistedValues: string[] = [];
   const errors: string[] = [];
@@ -109,7 +119,11 @@ describe("Golf Settings replacement component", () => {
         warnings: [],
       }],
     };
-    const model = buildCourseSettingsModel("/project/.pi/golf/courses", discovery, "builtin:preview-course", []);
+    const model = buildCourseSettingsModel(
+      "/project/.pi/golf/courses",
+      discovery,
+      previewSnapshot(),
+    );
     const requestRender = vi.fn();
     const onClose = vi.fn();
     const component = createCourseSettingsComponent({
@@ -138,8 +152,7 @@ describe("Golf Settings replacement component", () => {
     const model = buildCourseSettingsModel(
       "/courses",
       discoveredCourses("Custom Course"),
-      "builtin:preview-course",
-      [],
+      previewSnapshot(),
     );
     const onChange = vi.fn();
     const requestRender = vi.fn();
@@ -232,7 +245,7 @@ describe("Golf Settings replacement component", () => {
         diagnostics: [],
         warnings: [],
       }],
-    }, "builtin:preview-course", []);
+    }, previewSnapshot());
     const component = createCourseSettingsComponent({
       model,
       theme: changingTheme,

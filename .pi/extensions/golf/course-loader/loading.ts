@@ -89,7 +89,7 @@ export async function loadCourseFile(sourcePath: string): Promise<CourseFileLoad
       issue: issue(
         "reserved-course-id",
         sourcePath,
-        `Course ID ${JSON.stringify(validation.value.id)} is reserved by built-in content; choose a different Course ID.`,
+        `Course ID ${JSON.stringify(validation.value.id)} in ${sourcePath} is reserved by built-in content; choose a different Course ID.`,
       ),
     };
   }

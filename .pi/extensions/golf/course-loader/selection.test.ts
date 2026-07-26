@@ -8,11 +8,13 @@ import {
   buildCourseSettingsModel,
   captureSelectedCourseSnapshot,
   discoverCourses,
+  formatCourseLoadIssue,
   getCourseProjectPaths,
   PREVIEW_COURSE_SETTINGS,
   PREVIEW_COURSE_SOURCE,
   readCourseSettings,
   selectCourseFromPath,
+  selectLoadedCourse,
   writeCourseSettings,
 } from "./index.ts";
 
@@ -227,6 +229,8 @@ describe("project Course settings and explicit selection", () => {
     if (result.ok) throw new Error("Expected reserved Course selection to fail.");
     expect(result.issue.code).toBe("reserved-course-id");
     expect(result.issue.message).toContain("choose a different Course ID");
+    expect(result.issue.message).toContain(sourcePath);
+    expect(formatCourseLoadIssue(result.issue)).toContain(sourcePath);
     expect(await readFile(settingsPath)).toEqual(before);
   });
 
@@ -296,6 +300,87 @@ describe("future-Round Course snapshot boundary", () => {
 });
 
 describe("Golf settings UI model", () => {
+  it("reopens on a validated outside selection and keeps every option source-specific", async () => {
+    const cwd = await temporaryProject("ui-outside-selection");
+    const { coursesDirectory } = getCourseProjectPaths(cwd);
+    const discoveredPath = join(coursesDirectory, "collision.json");
+    const invalidPath = join(coursesDirectory, "invalid.json");
+    const outsidePath = join(cwd, "outside courses", "collision course.json");
+    await writeJson(discoveredPath, makeCourse("collision-id", "Collision Course"));
+    await writeFile(invalidPath, "{", "utf8");
+    await writeJson(outsidePath, makeCourse("collision-id", "Collision Course"));
+
+    expect((await selectCourseFromPath(
+      cwd,
+      join("outside courses", "collision course.json"),
+    )).ok).toBe(true);
+    const discovery = await discoverCourses(coursesDirectory);
+    const selected = await captureSelectedCourseSnapshot(cwd);
+    const model = buildCourseSettingsModel(coursesDirectory, discovery, selected);
+
+    expect(model.items).toHaveLength(1);
+    expect(model.options[0]).toMatchObject({
+      label: "Preview Course",
+      courseId: "preview-course",
+      loaded: "preview",
+    });
+    expect(model.options.map((option) => option.sourcePath)).toEqual([
+      PREVIEW_COURSE_SOURCE, discoveredPath, outsidePath,
+    ]);
+    const outsideOptions = model.options.filter((option) => option.sourcePath === outsidePath);
+    expect(outsideOptions).toHaveLength(1);
+    const outsideOption = outsideOptions[0];
+    if (outsideOption === undefined || outsideOption.loaded === "preview") {
+      throw new Error("Expected the validated outside Course option.");
+    }
+    expect(outsideOption).toMatchObject({ courseId: "collision-id", sourcePath: outsidePath });
+    expect(outsideOption.loaded.course).toBe(selected.course);
+    expect(model.items[0]?.currentValue).toBe(outsideOption.label);
+    expect(model.items[0]?.values).toContain(outsideOption.label);
+    expect(outsideOption.label).toContain("outside courses/collision course.json");
+    expect(new Set(model.items[0]?.values).size).toBe(model.items[0]?.values?.length);
+    expect(model.warningLines.join("\n")).toContain(invalidPath);
+    expect(model.options.some((option) => option.sourcePath === invalidPath)).toBe(false);
+
+    await selectLoadedCourse(cwd, "preview");
+    expect((await readCourseSettings(cwd)).settings).toEqual(PREVIEW_COURSE_SETTINGS);
+    await selectLoadedCourse(cwd, outsideOption.loaded);
+    expect((await readCourseSettings(cwd)).settings).toEqual({
+      selectedCourseId: "collision-id",
+      sourcePath: outsidePath,
+    });
+    const discoveredOption = model.options.find((option) => option.sourcePath === discoveredPath);
+    if (discoveredOption === undefined || discoveredOption.loaded === "preview") {
+      throw new Error("Expected the discovered custom Course option.");
+    }
+    await selectLoadedCourse(cwd, discoveredOption.loaded);
+    expect((await readCourseSettings(cwd)).settings).toEqual({
+      selectedCourseId: "collision-id",
+      sourcePath: discoveredPath,
+    });
+    const discoveredSelected = await captureSelectedCourseSnapshot(cwd);
+    const discoveredSelectedModel = buildCourseSettingsModel(
+      coursesDirectory,
+      discovery,
+      discoveredSelected,
+    );
+    const reopenedDiscoveredOptions = discoveredSelectedModel.options.filter(
+      (option) => option.sourcePath === discoveredPath,
+    );
+    expect(reopenedDiscoveredOptions).toHaveLength(1);
+    expect(discoveredSelectedModel.items[0]?.currentValue).toBe(
+      reopenedDiscoveredOptions[0]?.label,
+    );
+
+    await selectLoadedCourse(cwd, outsideOption.loaded);
+    await rm(outsidePath);
+    const unavailable = await captureSelectedCourseSnapshot(cwd);
+    const fallbackModel = buildCourseSettingsModel(coursesDirectory, discovery, unavailable);
+    expect(fallbackModel.items[0]?.currentValue).toBe("Preview Course");
+    expect(fallbackModel.options.some((option) => option.sourcePath === outsidePath)).toBe(false);
+    expect(fallbackModel.warningLines.join("\n")).toContain(outsidePath);
+  });
+
   it("contains exactly one Course setting and keeps warnings out of deterministic values", async () => {
     const cwd = await temporaryProject("ui-model");
     const { coursesDirectory } = getCourseProjectPaths(cwd);
@@ -303,7 +388,8 @@ describe("Golf settings UI model", () => {
     await writeJson(join(coursesDirectory, "a.json"), makeCourse("a", "Same"));
     await writeFile(join(coursesDirectory, "broken.json"), "{", "utf8");
     const discovery = await discoverCourses(coursesDirectory);
-    const model = buildCourseSettingsModel(coursesDirectory, discovery, PREVIEW_COURSE_SOURCE, []);
+    const selected = await captureSelectedCourseSnapshot(cwd);
+    const model = buildCourseSettingsModel(coursesDirectory, discovery, selected);
 
     expect(model.title).toBe("Golf Settings");
     expect(model.items).toHaveLength(1);

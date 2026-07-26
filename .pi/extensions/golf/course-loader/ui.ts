@@ -23,8 +23,14 @@ import {
   captureSelectedCourseSnapshot,
   selectLoadedCourse,
   type CourseSelectionWarning,
+  type SelectedCourseSnapshot,
 } from "./selection.ts";
-import { getCourseProjectPaths, type CourseSettingsIssue } from "./settings.ts";
+import {
+  getCourseProjectPaths,
+  PREVIEW_COURSE_ID,
+  PREVIEW_COURSE_SOURCE,
+  type CourseSettingsIssue,
+} from "./settings.ts";
 
 export const GOLF_SETTINGS_TITLE = "Golf Settings";
 export const COURSE_SETTING_ID = "course";
@@ -81,17 +87,32 @@ function uniqueCourseLabels(
 export function buildCourseSettingsModel(
   coursesDirectory: string,
   discovery: CourseDiscoveryResult,
-  selectedSourcePath: string,
-  selectionWarnings: readonly (CourseSettingsIssue | CourseSelectionWarning)[],
+  selectedSnapshot: SelectedCourseSnapshot,
 ): CourseSettingsModel {
-  const labels = uniqueCourseLabels(coursesDirectory, discovery.courses);
+  const coursesBySource = new Map<string, LoadedCourseFile>();
+  for (const loaded of discovery.courses) {
+    if (!coursesBySource.has(loaded.sourcePath)) coursesBySource.set(loaded.sourcePath, loaded);
+  }
+
+  if (selectedSnapshot.sourcePath !== PREVIEW_COURSE_SOURCE) {
+    // The effective snapshot is freshly loaded and fully validated. Replacing a
+    // discovered record with it also avoids duplicate options for one source.
+    coursesBySource.set(selectedSnapshot.sourcePath, {
+      course: selectedSnapshot.course,
+      sourcePath: selectedSnapshot.sourcePath,
+      warnings: selectedSnapshot.courseWarnings,
+    });
+  }
+
+  const selectableCourses = [...coursesBySource.values()];
+  const labels = uniqueCourseLabels(coursesDirectory, selectableCourses);
   const options: CourseSettingOption[] = [{
     label: "Preview Course",
-    courseId: "preview-course",
-    sourcePath: "builtin:preview-course",
+    courseId: PREVIEW_COURSE_ID,
+    sourcePath: PREVIEW_COURSE_SOURCE,
     loaded: "preview",
   }];
-  discovery.courses.forEach((loaded, index) => {
+  selectableCourses.forEach((loaded, index) => {
     const label = labels[index];
     if (label === undefined) throw new Error("Missing deterministic Course label.");
     options.push({
@@ -101,8 +122,8 @@ export function buildCourseSettingsModel(
       loaded,
     });
   });
-  const selected = options.find((option) => option.sourcePath === selectedSourcePath) ?? options[0];
-  if (selected === undefined) throw new Error("Preview Course option is missing.");
+  const selected = options.find((option) => option.sourcePath === selectedSnapshot.sourcePath);
+  if (selected === undefined) throw new Error("Effective Course option is missing.");
 
   return {
     title: GOLF_SETTINGS_TITLE,
@@ -115,7 +136,7 @@ export function buildCourseSettingsModel(
     options,
     warningLines: [
       ...discovery.warnings.map(formatCourseLoadIssue),
-      ...selectionWarnings.map(selectionWarningText),
+      ...selectedSnapshot.warnings.map(selectionWarningText),
     ],
   };
 }
@@ -295,12 +316,7 @@ export async function showCourseSettings(ctx: ExtensionCommandContext): Promise<
     discoverCourses(paths.coursesDirectory),
     captureSelectedCourseSnapshot(ctx.cwd),
   ]);
-  const model = buildCourseSettingsModel(
-    paths.coursesDirectory,
-    discovery,
-    selected.sourcePath,
-    selected.warnings,
-  );
+  const model = buildCourseSettingsModel(paths.coursesDirectory, discovery, selected);
   let component: CourseSettingsComponent | undefined;
 
   await ctx.ui.custom((tui, theme, _keybindings, done) => {

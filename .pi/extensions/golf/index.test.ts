@@ -174,9 +174,10 @@ describe("project-local extension entrypoint", () => {
     const reservedContext = context(cwd);
     await command.handler("course reserved.json", reservedContext.value);
 
-    expect(String(reservedContext.notify.mock.calls[0]?.[0])).toContain(
-      "reserved by built-in content",
-    );
+    const reservedMessage = String(reservedContext.notify.mock.calls[0]?.[0]);
+    expect(reservedMessage).toContain("Course ID \"preview-course\"");
+    expect(reservedMessage).toContain("reserved by built-in content");
+    expect(reservedMessage).toContain(reservedPath);
     expect(reservedContext.notify.mock.calls[0]?.[1]).toBe("error");
     expect((await readCourseSettings(cwd)).settings).toEqual(before);
   });
