@@ -11,37 +11,27 @@ import {
   type Component,
   type SettingItem,
 } from "@earendil-works/pi-tui";
-import { relative } from "node:path";
-
+import {
+  PREVIEW_COURSE_CATALOG,
+  reconcileCourseCatalog,
+  type CourseCatalogOption,
+} from "./catalog.ts";
 import {
   discoverCourses,
-  formatCourseLoadIssue,
   type CourseDiscoveryResult,
-  type LoadedCourseFile,
 } from "./loading.ts";
 import {
   captureSelectedCourseSnapshot,
   selectLoadedCourse,
-  type CourseSelectionWarning,
   type SelectedCourseSnapshot,
 } from "./selection.ts";
-import {
-  getCourseProjectPaths,
-  PREVIEW_COURSE_ID,
-  PREVIEW_COURSE_SOURCE,
-  type CourseSettingsIssue,
-} from "./settings.ts";
+import { getCourseProjectPaths } from "./settings.ts";
 
 export const GOLF_SETTINGS_TITLE = "Golf Settings";
 export const COURSE_SETTING_ID = "course";
 export const COURSE_SETTING_LABEL = "Course";
 
-export interface CourseSettingOption {
-  readonly label: string;
-  readonly courseId: string;
-  readonly sourcePath: string;
-  readonly loaded: LoadedCourseFile | "preview";
-}
+export type CourseSettingOption = CourseCatalogOption;
 
 export interface CourseSettingsModel {
   readonly title: typeof GOLF_SETTINGS_TITLE;
@@ -50,94 +40,29 @@ export interface CourseSettingsModel {
   readonly warningLines: readonly string[];
 }
 
-function selectionWarningText(warning: CourseSettingsIssue | CourseSelectionWarning): string {
-  if ("settingsPath" in warning) return warning.message;
-  if (warning.loadIssue === undefined) return warning.message;
-  return `${warning.message}\n${formatCourseLoadIssue(warning.loadIssue)}`;
-}
-
-function uniqueCourseLabels(
-  coursesDirectory: string,
-  courses: readonly LoadedCourseFile[],
-): readonly string[] {
-  const nameCounts = new Map<string, number>();
-  for (const loaded of courses) {
-    nameCounts.set(loaded.course.name, (nameCounts.get(loaded.course.name) ?? 0) + 1);
-  }
-
-  const used = new Set(["Preview Course"]);
-  return courses.map((loaded) => {
-    const duplicateName = (nameCounts.get(loaded.course.name) ?? 0) > 1
-      || used.has(loaded.course.name);
-    const base = duplicateName
-      ? `${loaded.course.name} — ${relative(coursesDirectory, loaded.sourcePath)}`
-      : loaded.course.name;
-    let label = base;
-    let suffix = 2;
-    while (used.has(label)) {
-      label = `${base} (${suffix})`;
-      suffix += 1;
-    }
-    used.add(label);
-    return label;
-  });
-}
-
 /** Builds the inspectable single-setting model separately from terminal rendering. */
 export function buildCourseSettingsModel(
   coursesDirectory: string,
   discovery: CourseDiscoveryResult,
   selectedSnapshot: SelectedCourseSnapshot,
 ): CourseSettingsModel {
-  const coursesBySource = new Map<string, LoadedCourseFile>();
-  for (const loaded of discovery.courses) {
-    if (!coursesBySource.has(loaded.sourcePath)) coursesBySource.set(loaded.sourcePath, loaded);
-  }
-
-  if (selectedSnapshot.sourcePath !== PREVIEW_COURSE_SOURCE) {
-    // The effective snapshot is freshly loaded and fully validated. Replacing a
-    // discovered record with it also avoids duplicate options for one source.
-    coursesBySource.set(selectedSnapshot.sourcePath, {
-      course: selectedSnapshot.course,
-      sourcePath: selectedSnapshot.sourcePath,
-      warnings: selectedSnapshot.courseWarnings,
-    });
-  }
-
-  const selectableCourses = [...coursesBySource.values()];
-  const labels = uniqueCourseLabels(coursesDirectory, selectableCourses);
-  const options: CourseSettingOption[] = [{
-    label: "Preview Course",
-    courseId: PREVIEW_COURSE_ID,
-    sourcePath: PREVIEW_COURSE_SOURCE,
-    loaded: "preview",
-  }];
-  selectableCourses.forEach((loaded, index) => {
-    const label = labels[index];
-    if (label === undefined) throw new Error("Missing deterministic Course label.");
-    options.push({
-      label,
-      courseId: loaded.course.id,
-      sourcePath: loaded.sourcePath,
-      loaded,
-    });
+  const catalog = reconcileCourseCatalog({
+    preview: PREVIEW_COURSE_CATALOG,
+    coursesDirectory,
+    discovery,
+    selectedSnapshot,
   });
-  const selected = options.find((option) => option.sourcePath === selectedSnapshot.sourcePath);
-  if (selected === undefined) throw new Error("Effective Course option is missing.");
 
   return {
     title: GOLF_SETTINGS_TITLE,
     items: [{
       id: COURSE_SETTING_ID,
       label: COURSE_SETTING_LABEL,
-      currentValue: selected.label,
-      values: options.map((option) => option.label),
+      currentValue: catalog.currentValue,
+      values: catalog.options.map((option) => option.label),
     }],
-    options,
-    warningLines: [
-      ...discovery.warnings.map(formatCourseLoadIssue),
-      ...selectedSnapshot.warnings.map(selectionWarningText),
-    ],
+    options: catalog.options,
+    warningLines: catalog.warnings.map((warning) => warning.message),
   };
 }
 

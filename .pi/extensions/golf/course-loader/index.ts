@@ -20,12 +20,22 @@ export {
   discoverCourses,
   formatCourseLoadIssue,
   loadCourseFile,
+  loadSelectableCourseFile,
   type CourseDiscoveryResult,
   type CourseFileLoadResult,
   type CourseLoadIssue,
   type CourseLoadIssueCode,
   type LoadedCourseFile,
 } from "./loading.ts";
+export {
+  PREVIEW_COURSE_CATALOG,
+  reconcileCourseCatalog,
+  type CourseCatalog,
+  type CourseCatalogInput,
+  type CourseCatalogOption,
+  type CourseCatalogPreview,
+  type CourseCatalogWarning,
+} from "./catalog.ts";
 export {
   getCourseProjectPaths,
   isReservedBuiltInCourseId,

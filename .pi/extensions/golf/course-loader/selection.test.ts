@@ -136,7 +136,7 @@ describe("custom Course discovery", () => {
     ]));
   });
 
-  it("rejects every ambiguous duplicate ID, including the built-in ID", async () => {
+  it("retains independently valid duplicate IDs for catalog reconciliation and rejects the built-in ID", async () => {
     const cwd = await temporaryProject("duplicates");
     const { coursesDirectory } = getCourseProjectPaths(cwd);
     await writeJson(join(coursesDirectory, "a.json"), makeCourse("same-id", "First"));
@@ -145,13 +145,22 @@ describe("custom Course discovery", () => {
     await writeJson(join(coursesDirectory, "unique.json"), makeCourse("unique-id", "Unique"));
 
     const result = await discoverCourses(coursesDirectory);
-    expect(result.courses.map((loaded) => loaded.course.id)).toEqual(["unique-id"]);
-    expect(result.warnings).toHaveLength(3);
-    expect(result.warnings.map((warning) => warning.code)).toEqual([
-      "reserved-course-id", "duplicate-course-id", "duplicate-course-id",
+    expect(result.courses.map((loaded) => loaded.course.id)).toEqual([
+      "same-id", "same-id", "preview-course", "unique-id",
     ]);
-    expect(result.warnings.map((warning) => warning.message).join("\n")).toContain("a.json, b.json");
-    expect(result.warnings.map((warning) => warning.message).join("\n")).toContain("reserved by built-in content");
+    expect(result.warnings).toEqual([]);
+
+    const model = buildCourseSettingsModel(
+      coursesDirectory,
+      result,
+      await captureSelectedCourseSnapshot(cwd),
+    );
+    expect(model.options.map((option) => option.courseId)).toEqual([
+      "preview-course", "unique-id",
+    ]);
+    expect(model.warningLines).toHaveLength(3);
+    expect(model.warningLines.join("\n")).toContain("a.json, b.json");
+    expect(model.warningLines.join("\n")).toContain("reserved by Preview Course");
   });
 });
 
@@ -271,6 +280,64 @@ describe("future-Round Course snapshot boundary", () => {
     expect(mismatch.warnings[0]?.code).toBe("selected-course-id-mismatch");
   });
 
+  it("falls back before catalog reconciliation for every invalid selected-source cause", async () => {
+    const cwd = await temporaryProject("selected-source-fallbacks");
+    const { coursesDirectory } = getCourseProjectPaths(cwd);
+    const missingPath = join(cwd, "missing-selected.json");
+    const unreadablePath = join(cwd, "selected-directory.json");
+    const malformedPath = join(cwd, "malformed-selected.json");
+    const invalidPath = join(cwd, "invalid-selected.json");
+    const reservedPath = join(cwd, "reserved-selected.json");
+    const changedPath = join(cwd, "changed-selected.json");
+
+    await mkdir(unreadablePath, { recursive: true });
+    await writeFile(malformedPath, "{", "utf8");
+    const invalidCourse = makeCourse("invalid-selected", "Invalid Selected");
+    const invalidHole = invalidCourse.holes[0];
+    if (invalidHole === undefined) throw new Error("Missing invalid selected fixture Hole.");
+    invalidHole.par = 9;
+    await writeJson(invalidPath, invalidCourse);
+    await writeJson(reservedPath, makeCourse("preview-course", "Reserved Selected"));
+    await writeJson(changedPath, makeCourse("changed-id", "Changed Selected"));
+
+    const cases = [
+      { sourcePath: missingPath, selectedCourseId: "missing", issueCode: "unreadable-course" },
+      { sourcePath: unreadablePath, selectedCourseId: "unreadable", issueCode: "unreadable-course" },
+      { sourcePath: malformedPath, selectedCourseId: "malformed", issueCode: "malformed-json" },
+      { sourcePath: invalidPath, selectedCourseId: "invalid-selected", issueCode: "invalid-course" },
+      { sourcePath: reservedPath, selectedCourseId: "preview-course", issueCode: "reserved-course-id" },
+      { sourcePath: changedPath, selectedCourseId: "persisted-id", issueCode: undefined },
+    ] as const;
+
+    for (const fallbackCase of cases) {
+      await writeCourseSettings(cwd, {
+        selectedCourseId: fallbackCase.selectedCourseId,
+        sourcePath: fallbackCase.sourcePath,
+      });
+      const snapshot = await captureSelectedCourseSnapshot(cwd);
+      const model = buildCourseSettingsModel(
+        coursesDirectory,
+        { courses: [], warnings: [] },
+        snapshot,
+      );
+      expect(snapshot.sourcePath).toBe(PREVIEW_COURSE_SOURCE);
+      expect(snapshot.usedPreviewFallback).toBe(true);
+      expect(model.items[0]?.currentValue).toBe("Preview Course");
+      expect(model.options).toHaveLength(1);
+      expect(model.options.some((option) => option.sourcePath === fallbackCase.sourcePath)).toBe(false);
+      const selectionWarning = snapshot.warnings[0];
+      expect(selectionWarning).toBeDefined();
+      if (fallbackCase.issueCode === undefined) {
+        expect(selectionWarning?.code).toBe("selected-course-id-mismatch");
+      } else {
+        if (selectionWarning === undefined || !("loadIssue" in selectionWarning)) {
+          throw new Error("Expected selected Course load warning.");
+        }
+        expect(selectionWarning.loadIssue?.code).toBe(fallbackCase.issueCode);
+      }
+    }
+  });
+
   it("does not mutate a captured active snapshot when selection or source files change or disappear", async () => {
     const cwd = await temporaryProject("snapshot");
     const sourcePath = join(cwd, "selected.json");
@@ -306,9 +373,9 @@ describe("Golf settings UI model", () => {
     const discoveredPath = join(coursesDirectory, "collision.json");
     const invalidPath = join(coursesDirectory, "invalid.json");
     const outsidePath = join(cwd, "outside courses", "collision course.json");
-    await writeJson(discoveredPath, makeCourse("collision-id", "Collision Course"));
+    await writeJson(discoveredPath, makeCourse("discovered-collision-id", "Collision Course"));
     await writeFile(invalidPath, "{", "utf8");
-    await writeJson(outsidePath, makeCourse("collision-id", "Collision Course"));
+    await writeJson(outsidePath, makeCourse("outside-collision-id", "Collision Course"));
 
     expect((await selectCourseFromPath(
       cwd,
@@ -333,7 +400,7 @@ describe("Golf settings UI model", () => {
     if (outsideOption === undefined || outsideOption.loaded === "preview") {
       throw new Error("Expected the validated outside Course option.");
     }
-    expect(outsideOption).toMatchObject({ courseId: "collision-id", sourcePath: outsidePath });
+    expect(outsideOption).toMatchObject({ courseId: "outside-collision-id", sourcePath: outsidePath });
     expect(outsideOption.loaded.course).toBe(selected.course);
     expect(model.items[0]?.currentValue).toBe(outsideOption.label);
     expect(model.items[0]?.values).toContain(outsideOption.label);
@@ -346,7 +413,7 @@ describe("Golf settings UI model", () => {
     expect((await readCourseSettings(cwd)).settings).toEqual(PREVIEW_COURSE_SETTINGS);
     await selectLoadedCourse(cwd, outsideOption.loaded);
     expect((await readCourseSettings(cwd)).settings).toEqual({
-      selectedCourseId: "collision-id",
+      selectedCourseId: "outside-collision-id",
       sourcePath: outsidePath,
     });
     const discoveredOption = model.options.find((option) => option.sourcePath === discoveredPath);
@@ -355,7 +422,7 @@ describe("Golf settings UI model", () => {
     }
     await selectLoadedCourse(cwd, discoveredOption.loaded);
     expect((await readCourseSettings(cwd)).settings).toEqual({
-      selectedCourseId: "collision-id",
+      selectedCourseId: "discovered-collision-id",
       sourcePath: discoveredPath,
     });
     const discoveredSelected = await captureSelectedCourseSnapshot(cwd);
@@ -379,6 +446,29 @@ describe("Golf settings UI model", () => {
     expect(fallbackModel.items[0]?.currentValue).toBe("Preview Course");
     expect(fallbackModel.options.some((option) => option.sourcePath === outsidePath)).toBe(false);
     expect(fallbackModel.warningLines.join("\n")).toContain(outsidePath);
+  });
+
+  it("lets an explicit discovered conflict become the sole selected winner", async () => {
+    const cwd = await temporaryProject("explicit-conflict-winner");
+    const { coursesDirectory } = getCourseProjectPaths(cwd);
+    const firstPath = join(coursesDirectory, "a.json");
+    const selectedPath = join(coursesDirectory, "b.json");
+    await writeJson(firstPath, makeCourse("shared-explicit-id", "First Conflict"));
+    await writeJson(selectedPath, makeCourse("shared-explicit-id", "Selected Conflict"));
+
+    expect((await selectCourseFromPath(cwd, selectedPath)).ok).toBe(true);
+    const model = buildCourseSettingsModel(
+      coursesDirectory,
+      await discoverCourses(coursesDirectory),
+      await captureSelectedCourseSnapshot(cwd),
+    );
+
+    expect(model.options.filter((option) => option.courseId === "shared-explicit-id"))
+      .toEqual([expect.objectContaining({ sourcePath: selectedPath })]);
+    expect(model.items[0]?.currentValue).toBe("Selected Conflict");
+    expect(model.warningLines).toHaveLength(1);
+    expect(model.warningLines[0]).toContain("source a.json is not selectable");
+    expect(model.warningLines[0]).toContain("selected source b.json");
   });
 
   it("contains exactly one Course setting and keeps warnings out of deterministic values", async () => {

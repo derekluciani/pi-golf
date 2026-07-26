@@ -1,5 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
-import { extname, join, relative } from "node:path";
+import { extname, join } from "node:path";
 
 import { isReservedBuiltInCourseId } from "./settings.ts";
 import { parseCourse } from "./validation.ts";
@@ -83,20 +83,23 @@ export async function loadCourseFile(sourcePath: string): Promise<CourseFileLoad
     };
   }
 
-  if (isReservedBuiltInCourseId(validation.value.id)) {
-    return {
-      ok: false,
-      issue: issue(
-        "reserved-course-id",
-        sourcePath,
-        `Course ID ${JSON.stringify(validation.value.id)} in ${sourcePath} is reserved by built-in content; choose a different Course ID.`,
-      ),
-    };
-  }
-
   return {
     ok: true,
     value: { course: validation.value, sourcePath, warnings: validation.warnings },
+  };
+}
+
+/** Applies external selection identity policy after independent file validation. */
+export async function loadSelectableCourseFile(sourcePath: string): Promise<CourseFileLoadResult> {
+  const loaded = await loadCourseFile(sourcePath);
+  if (!loaded.ok || !isReservedBuiltInCourseId(loaded.value.course.id)) return loaded;
+  return {
+    ok: false,
+    issue: issue(
+      "reserved-course-id",
+      sourcePath,
+      `Course ID ${JSON.stringify(loaded.value.course.id)} in ${sourcePath} is reserved by built-in content; choose a different Course ID.`,
+    ),
   };
 }
 
@@ -139,41 +142,9 @@ async function findJsonFiles(directory: string, missingIsEmpty = false): Promise
   return { files, warnings };
 }
 
-function duplicateIdIssues(
-  discoveryDirectory: string,
-  courses: readonly LoadedCourseFile[],
-): { readonly courses: LoadedCourseFile[]; readonly warnings: CourseLoadIssue[] } {
-  const byId = new Map<string, LoadedCourseFile[]>();
-  for (const course of courses) {
-    const matches = byId.get(course.course.id) ?? [];
-    matches.push(course);
-    byId.set(course.course.id, matches);
-  }
-
-  const selectable: LoadedCourseFile[] = [];
-  const warnings: CourseLoadIssue[] = [];
-  for (const course of courses) {
-    const matches = byId.get(course.course.id) ?? [];
-    if (matches.length === 1) {
-      selectable.push(course);
-      continue;
-    }
-    const sources = matches
-      .map((match) => relative(discoveryDirectory, match.sourcePath))
-      .sort()
-      .join(", ");
-    warnings.push(issue(
-      "duplicate-course-id",
-      course.sourcePath,
-      `Course ID ${JSON.stringify(course.course.id)} conflicts with multiple files (${sources}); this file is not selectable.`,
-    ));
-  }
-  return { courses: selectable, warnings };
-}
-
 /**
- * Recursively discovers JSON files in stable path order. A missing root is an
- * empty custom list; every other file/directory failure remains a warning.
+ * Recursively discovers and independently validates JSON files in stable path
+ * order. Cross-source identity is retained for catalog-wide reconciliation.
  */
 export async function discoverCourses(discoveryDirectory: string): Promise<CourseDiscoveryResult> {
   const walked = await findJsonFiles(discoveryDirectory, true);
@@ -198,10 +169,9 @@ export async function discoverCourses(discoveryDirectory: string): Promise<Cours
     }
   }
 
-  const deduplicated = duplicateIdIssues(discoveryDirectory, loaded);
   return {
-    courses: deduplicated.courses,
-    warnings: [...warnings, ...deduplicated.warnings],
+    courses: loaded,
+    warnings,
   };
 }
 

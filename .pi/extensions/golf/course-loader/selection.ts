@@ -1,7 +1,11 @@
 import { isAbsolute, resolve } from "node:path";
 
 import { loadPreviewCourse } from "../courses/index.ts";
-import { loadCourseFile, type CourseLoadIssue, type LoadedCourseFile } from "./loading.ts";
+import {
+  loadSelectableCourseFile,
+  type CourseLoadIssue,
+  type LoadedCourseFile,
+} from "./loading.ts";
 import {
   PREVIEW_COURSE_ID,
   PREVIEW_COURSE_SETTINGS,
@@ -88,7 +92,7 @@ export async function captureSelectedCourseSnapshot(cwd: string): Promise<Select
     return previewSnapshot(warnings, true);
   }
 
-  const loaded = await loadCourseFile(persisted.settings.sourcePath);
+  const loaded = await loadSelectableCourseFile(persisted.settings.sourcePath);
   if (!loaded.ok) {
     warnings.push({
       code: "selected-course-unavailable",
@@ -123,7 +127,7 @@ export async function selectCourseFromPath(
   suppliedPath: string,
 ): Promise<ExplicitCourseSelectionResult> {
   const sourcePath = isAbsolute(suppliedPath) ? resolve(suppliedPath) : resolve(cwd, suppliedPath);
-  const loaded = await loadCourseFile(sourcePath);
+  const loaded = await loadSelectableCourseFile(sourcePath);
   if (!loaded.ok) return { ok: false, sourcePath, issue: loaded.issue };
 
   const settings: CourseSettings = {

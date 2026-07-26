@@ -16,6 +16,7 @@
     "scripts/patch-pi-brace-expansion.mjs",
     "README.md",
     ".pi/extensions/golf/course-loader/course.schema.json",
+    ".pi/extensions/golf/course-loader/catalog.ts",
     ".pi/extensions/golf/course-loader/geometry.ts",
     ".pi/extensions/golf/course-loader/index.ts",
     ".pi/extensions/golf/course-loader/ui.ts",

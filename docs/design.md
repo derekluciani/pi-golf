@@ -513,6 +513,18 @@ Per [ADR 0001](adr/0001-versioned-json-course-format.md), built-in and custom Co
 - Persist selected Course ID and source path in `.pi/golf/settings.json`.
 - If a selected external file disappears, warn and fall back to Preview Course.
 
+### Course catalog identity and precedence
+
+- Preview Course exclusively owns Course ID `preview-course`; an external Course using that ID is invalid and nonselectable.
+- The reconciled selectable catalog has at most one option per Course ID and at most one option per source path. Collapse exact source-path duplicates before comparing Course IDs.
+- Resolve the persisted `(selected Course ID, source path)` as a locator-plus-integrity pair before catalog reconciliation. Missing, unreadable, malformed, validator-invalid, reserved-ID, and ID-changed selected sources fall back to Preview Course and never become options.
+- A freshly validated effective selected external source wins its nonreserved Course ID, whether it is inside or outside discovery. Exclude every other discovered source with that ID and emit one deterministic source-aware identity warning per loser; the selected source never warns against itself.
+- If a remaining Course ID occurs in multiple discovered sources and has no effective selected winner, exclude every source in that identity group and emit deterministic source-aware warnings.
+- A discovered conflict appearing or disappearing cannot replace a valid selected source. Explicitly selecting another valid nonreserved conflicting source is allowed and makes that source the winner on the next catalog reconciliation.
+- Equal display names do not conflict when Course IDs differ. Keep each distinct ID selectable and use deterministic source-qualified labels.
+- Preview Course is always the first option. Option Course IDs, source paths, and labels are globally unique; the current value maps to exactly one option; warnings are never values. Candidate input order cannot affect catalog option or warning bytes.
+- One pure catalog reconciler owns exact-source collapse, selected-source precedence, duplicate-ID exclusion, labels, ordering, current value, and identity warnings. Discovery owns traversal plus file, JSON, schema, and semantic validity and retains every independently valid candidate needed by reconciliation. The settings UI renders the reconciled result without adding conflict policy.
+
 ### `/golf course` UI
 
 Use Pi's settings visual style:
@@ -522,8 +534,8 @@ Use Pi's settings visual style:
 - `getSettingsListTheme()`
 - Title: `Golf Settings`
 - One setting: `Course`
-- Values: Preview Course plus every valid discovered custom Course
-- Validation failures appear below the list as warning text, not selectable Courses
+- Values: the Preview-first reconciled catalog, including the valid effective selected external Course when it is outside discovery
+- Validation and identity-conflict failures appear below the list as warning text, not selectable Courses
 
 This is ordinary replacement UI, not the top-right gameplay overlay.
 
