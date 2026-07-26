@@ -1,13 +1,20 @@
 # Pi Golf Documentation
 
-## Orchestrator handoff
+## Current authority
 
-Read these artifacts in order:
+Read current documentation in this order:
 
 1. [`CONTEXT.md`](CONTEXT.md) — canonical domain language.
-2. [`design.md`](design.md) — normative version-1 game and technical design.
-3. [`version-1-requirements.md`](version-1-requirements.md) — traceable requirement catalog, acceptance outcomes, dependency shape, and ticket-slicing guidance.
-4. [`adr/0001-versioned-json-course-format.md`](adr/0001-versioned-json-course-format.md) — why built-in and custom Courses share a versioned JSON pipeline.
-5. [`adr/0002-resolve-shots-before-animation.md`](adr/0002-resolve-shots-before-animation.md) — why Shots resolve and persist before playback.
+2. [`PRD.md`](PRD.md) — sole normative Version 2 product requirements, acceptance criteria, dependency gates, and completion criteria.
+3. [`adr/`](adr/) — architectural rationale that does not override the PRD.
+4. [`course-format.md`](course-format.md) — nonnormative Course-author guidance; the PRD controls any discrepancy and requires this guide to be reconciled before Version 2 acceptance.
 
-When requirements and summaries differ, `design.md` is authoritative for version 1. When terminology differs, `CONTEXT.md` is authoritative.
+When terminology and product requirements differ, stop and reconcile `CONTEXT.md` and `PRD.md`; do not infer a resolution from historical files.
+
+## Historical provenance
+
+These files are retained for audit history only and are not implementation authorities:
+
+- [`design.md`](design.md) — original Version 1 design.
+- [`version-1-requirements.md`](version-1-requirements.md) — retired Version 1 requirement catalog and IDs.
+- [`requirements-audit-findings.md`](requirements-audit-findings.md) — audit and owner decisions ported into the PRD.

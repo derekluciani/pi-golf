@@ -40,7 +40,13 @@ The visual marker for the cup when a shot originates outside the green. It is re
 The expected number of strokes for completing a hole; each hole has a par from three through five.
 
 **Score**:
-The total of played strokes and penalty strokes across the round.
+The total of Hole Scores across the round.
+
+**Hole Score**:
+The total of Played Strokes and Penalty Strokes for one Hole.
+
+**Played Strokes**:
+The number of counted Stroke attempts taken during a Hole or Round, excluding Penalty Strokes.
 
 **Stroke**:
 One counted attempt to advance the ball by taking a shot.
@@ -77,7 +83,7 @@ The ball's current rate of travel. The selected club determines its initial spee
 The selected equipment that determines a shot's nominal distance, initial ball speed, and post-landing behavior. Every club may be selected from any playable terrain; poor choices remain legal, and the selection persists between strokes. The available clubs are driver, 3–9 irons, pitching wedge, and putter.
 
 **Target**:
-The aiming marker at the selected club's displayed full-power distance along the shot direction. From fairway and green it predicts the 100%-power landing position—or resting position for a putt—but from rough and bunker it does not reveal terrain penalties.
+The aiming marker at the selected club's expected full-power distance along the shot direction. It follows the lie's display rule and may differ from the actual landing or rest position when terrain penalties are hidden or the path changes terrain.
 _Avoid_: Target spot
 
 **Landing Position**:
