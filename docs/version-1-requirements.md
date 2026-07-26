@@ -71,6 +71,8 @@ Acceptance:
 - Every blocking validation rule in `design.md` has a test.
 - Validation returns all discovered errors with JSON paths rather than stopping at the first.
 - Invalid input is never silently repaired.
+- Geometry coordinates outside inclusive `[-1_000_000, 1_000_000]` reject at their exact JSON paths.
+- Ellipse radii and corridor widths must be greater than zero and at most `1_000_000`.
 - Ground connectivity is not a blocking rule.
 - Isolated land and sub-cell regions may emit warnings.
 - Bounding boxes larger than 512 × 512 are rejected.

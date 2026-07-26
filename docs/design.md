@@ -221,6 +221,9 @@ There is no wind, randomness, hidden accuracy value, or shot dispersion. Identic
 - Tee, Cup, ball, Target, geometry, and movement use continuous coordinates.
 - Persisted coordinates, speeds, elapsed times, and direction vectors are normalized to six decimal places.
 - Shared comparison epsilon: `1e-6`.
+- Version 1 Course geometry coordinates are limited to the inclusive range `[-1_000_000, 1_000_000]`.
+- Course ellipse radii and corridor widths must be greater than zero and at most `1_000_000` units.
+- Reject numeric values outside these limits at their exact JSON paths; never clamp, translate, coerce, or repair them.
 - Do not round animation frames; normalize only deterministic simulation checkpoints and persisted results.
 
 ### Lie Carry multipliers
@@ -577,8 +580,8 @@ Reject an entire Course and report every error with its JSON path when any block
 - Hole count outside 1–18.
 - Duplicate/invalid Hole IDs or numbers.
 - Par outside 3–5.
-- Non-finite coordinates.
-- Invalid polygons or non-positive ellipse/corridor dimensions.
+- Non-finite coordinates or coordinates outside inclusive `[-1_000_000, 1_000_000]`.
+- Invalid polygons, or ellipse radii/corridor widths that are not greater than zero and at most `1_000_000`.
 - Course Boundary bounding box larger than 512 × 512 units.
 - Tee or Cup outside the Course Boundary.
 - Tee or Cup resolving to Water or Bunker after region layering.
