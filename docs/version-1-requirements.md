@@ -1,10 +1,13 @@
 # Pi Golf — Version 1 Requirement Catalog
 
+> [!WARNING]
+> **Deprecated historical catalog.** [`PRD.md`](PRD.md) supersedes this document and its `V1-` IDs for the Version 2 reimplementation. Do not derive tickets or acceptance evidence from this file.
+
 ## Purpose
 
-This catalog is a handoff aid for an orchestrator that will turn version-1 scope into coding tickets with acceptance criteria. [`design.md`](design.md) remains the normative specification; this file supplies stable requirement IDs, dependencies, and observable acceptance outcomes.
+This catalog records the original Version 1 ticket handoff and is retained only for provenance. Current requirement IDs, dependencies, and observable acceptance outcomes are defined in [`PRD.md`](PRD.md).
 
-Tickets may combine or subdivide these requirements, but acceptance criteria must retain traceability to the IDs below.
+The `V1-` IDs below are retired and MUST NOT appear as Version 2 acceptance authority.
 
 ## Dependency shape
 
@@ -112,7 +115,14 @@ Acceptance:
 - Discover custom files under `.pi/golf/courses/`.
 - Persist selected Course ID and source path in `.pi/golf/settings.json`.
 - A valid explicit path may be outside the discovery directory.
-- Missing selected files warn and fall back to Preview Course for new Rounds.
+- Missing, unreadable, malformed, validator-invalid, reserved-ID, and ID-changed selected sources warn and fall back to Preview Course before catalog reconciliation for new Rounds.
+- Preview Course exclusively owns `preview-course`; external use is invalid and nonselectable.
+- One pure reconciliation boundary produces a Preview-first catalog with globally unique Course IDs and source paths, one exact current option, deterministic ordering, and warnings that are never values.
+- Exact source duplicates collapse first. A freshly validated effective selected external source wins its nonreserved ID inside or outside discovery; every discovered same-ID loser is excluded with a deterministic source-aware warning and the winner never warns against itself.
+- Without a selected winner, every source in a duplicate discovered-ID group is excluded with deterministic source-aware warnings.
+- Distinct IDs with equal display names remain selectable through deterministic source-qualified labels.
+- Discovery changes cannot silently replace a valid selected source; explicitly selecting another valid nonreserved conflicting source makes it the next winner.
+- Discovery retains all independently valid candidates and validation issues for the catalog reconciler rather than resolving cross-source identity during traversal.
 - Selection changes never mutate an active Round's Course snapshot.
 
 ### V1-CRS-006 — Course authoring documentation
@@ -375,9 +385,10 @@ Acceptance:
 
 - Uses `DynamicBorder`, `SettingsList`, and `getSettingsListTheme()`.
 - Title is `Golf Settings`.
-- Valid discovered Courses appear as values for one Course setting.
+- The Preview-first reconciled Course catalog appears as values for one Course setting, including a valid effective selected source outside discovery.
+- The UI renders reconciled identity precedence and does not independently filter or invent conflict behavior.
 - Selection persists for future Rounds only.
-- Invalid discovered files appear as warning text, not selectable values.
+- Invalid discovered files and identity conflicts appear as warning text, not selectable values.
 
 ### V1-CMD-003 — `/golf course <path>`
 
