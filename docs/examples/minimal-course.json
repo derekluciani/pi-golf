@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "minimal-course",
+  "name": "Minimal Course",
+  "holes": [
+    {
+      "id": "hole-1",
+      "number": 1,
+      "par": 3,
+      "boundary": {
+        "type": "polygon",
+        "points": [
+          { "x": 0, "y": 0 },
+          { "x": 20, "y": 0 },
+          { "x": 20, "y": 10 },
+          { "x": 0, "y": 10 }
+        ]
+      },
+      "tee": { "x": 2, "y": 5 },
+      "cup": { "x": 17, "y": 5 },
+      "regions": [
+        {
+          "terrain": "fairway",
+          "shape": {
+            "type": "corridor",
+            "points": [
+              { "x": 2, "y": 5 },
+              { "x": 17, "y": 5 }
+            ],
+            "width": 4
+          }
+        },
+        {
+          "terrain": "green",
+          "shape": {
+            "type": "ellipse",
+            "center": { "x": 17, "y": 5 },
+            "radiusX": 2,
+            "radiusY": 2
+          }
+        }
+      ]
+    }
+  ]
+}
