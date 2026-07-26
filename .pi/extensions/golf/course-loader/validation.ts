@@ -292,9 +292,9 @@ function semanticShape(
   switch (value.type) {
     case "polygon": {
       const points = usablePoints(value.points);
-      if (points === undefined) return undefined;
+      if (points === undefined || points.length < 3) return undefined;
       const polygon: PolygonShape = { type: "polygon", points };
-      if (points.length >= 3 && !isValidPolygon(polygon)) {
+      if (!isValidPolygon(polygon)) {
         errors.push({ path, code: "invalid-polygon", message: "Polygon vertices must have non-zero area and no self-intersections." });
         return undefined;
       }
@@ -308,9 +308,9 @@ function semanticShape(
     }
     case "corridor": {
       const points = usablePoints(value.points);
-      if (points === undefined || !usablePositiveDimension(value.width)) return undefined;
+      if (points === undefined || points.length < 2 || !usablePositiveDimension(value.width)) return undefined;
       const corridor: CorridorShape = { type: "corridor", points, width: value.width };
-      if (points.length >= 2 && !isValidCorridor(corridor)) {
+      if (!isValidCorridor(corridor)) {
         errors.push({ path, code: "invalid-corridor", message: "Corridor points must contain distinct consecutive vertices." });
         return undefined;
       }
@@ -335,15 +335,25 @@ function semanticRegions(
 ): readonly TerrainRegion[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const regions: TerrainRegion[] = [];
+  let completeListIsUsable = true;
   for (let index = 0; index < value.length; index += 1) {
-    if (!Object.hasOwn(value, index)) return undefined;
+    if (!Object.hasOwn(value, index)) {
+      completeListIsUsable = false;
+      continue;
+    }
     const region = value[index];
-    if (!isRecord(region) || !isTerrain(region.terrain)) return undefined;
+    if (!isRecord(region)) {
+      completeListIsUsable = false;
+      continue;
+    }
     const shape = semanticShape(region.shape, `${path}[${index}].shape`, errors);
-    if (shape === undefined) return undefined;
+    if (!isTerrain(region.terrain) || shape === undefined) {
+      completeListIsUsable = false;
+      continue;
+    }
     regions.push({ terrain: region.terrain, shape });
   }
-  return regions;
+  return completeListIsUsable ? regions : undefined;
 }
 
 interface PartialHole {

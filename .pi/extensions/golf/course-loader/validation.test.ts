@@ -386,6 +386,121 @@ describe("blocking Course validation", () => {
     ]));
   });
 
+  it("collects invalid shape geometry when Terrain is missing or unsupported", () => {
+    const invalidShape = {
+      type: "polygon",
+      points: [
+        { x: 0, y: 0 }, { x: 2, y: 2 }, { x: 0, y: 2 }, { x: 2, y: 0 },
+      ],
+    };
+    const hole = makeHole();
+    const green = hole.regions[0];
+    if (green === undefined) throw new Error("Missing Green fixture.");
+
+    const cases = [
+      {
+        region: { shape: invalidShape },
+        terrainDiagnostic: { path: "$.holes[0].regions[0].terrain", code: "missing-property" },
+      },
+      {
+        region: { terrain: "lava", shape: invalidShape },
+        terrainDiagnostic: { path: "$.holes[0].regions[0].terrain", code: "unsupported-terrain" },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const input = { ...makeCourse(), holes: [{ ...hole, regions: [testCase.region, green] }] };
+      const result = expectInvalid(input);
+      expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual([
+        { path: "$.holes[0].regions[0].shape", code: "invalid-polygon" },
+        testCase.terrainDiagnostic,
+      ]);
+      expect(result.warnings).toEqual([]);
+    }
+  });
+
+  it("walks malformed region siblings after sparse and invalid entries", () => {
+    const invalidPolygon = {
+      terrain: "fairway",
+      shape: {
+        type: "polygon",
+        points: [
+          { x: 0, y: 0 }, { x: 2, y: 2 }, { x: 0, y: 2 }, { x: 2, y: 0 },
+        ],
+      },
+    };
+    const invalidCorridor = {
+      terrain: "rough",
+      shape: {
+        type: "corridor",
+        points: [{ x: 1, y: 1 }, { x: 1, y: 1 }],
+        width: 1,
+      },
+    };
+    const hole = makeHole();
+    const green = hole.regions[0];
+    if (green === undefined) throw new Error("Missing Green fixture.");
+    const sparseRegions = new Array<unknown>(4);
+    sparseRegions[1] = invalidPolygon;
+    sparseRegions[2] = invalidCorridor;
+    sparseRegions[3] = green;
+
+    const cases = [
+      { regions: sparseRegions, firstCode: "invalid-array" },
+      { regions: [null, invalidPolygon, invalidCorridor, green], firstCode: "invalid-object" },
+    ] as const;
+
+    for (const testCase of cases) {
+      const input = { ...makeCourse(), holes: [{ ...hole, regions: testCase.regions }] };
+      const expected = [
+        { path: "$.holes[0].regions[0]", code: testCase.firstCode },
+        { path: "$.holes[0].regions[1].shape", code: "invalid-polygon" },
+        { path: "$.holes[0].regions[2].shape", code: "invalid-corridor" },
+      ];
+      const result = expectInvalid(input);
+      expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual(expected);
+      expect(expectInvalid(input).errors.map(({ path, code }) => ({ path, code }))).toEqual(expected);
+      expect(result.warnings).toEqual([]);
+    }
+  });
+
+  it("does not use a short Course Boundary for placement, layering, or warnings", () => {
+    const hole = makeHole();
+    hole.boundary.points = [{ x: 0, y: 0 }, { x: 6, y: 6 }];
+
+    const result = expectInvalid(makeCourse([hole]));
+    expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual([
+      { path: "$.holes[0].boundary.points", code: "invalid-polygon" },
+    ]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("does not use short region polygons or corridors for layering or warnings", () => {
+    const cases = [
+      {
+        shape: { type: "polygon", points: [{ x: 5, y: 5 }, { x: 6, y: 6 }] },
+        code: "invalid-polygon",
+      },
+      {
+        shape: { type: "corridor", points: [{ x: 5.5, y: 5.5 }], width: 1 },
+        code: "invalid-corridor",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const hole = makeHole();
+      const input = {
+        ...makeCourse(),
+        holes: [{ ...hole, regions: [{ terrain: "green", shape: testCase.shape }] }],
+      };
+      const result = expectInvalid(input);
+      expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual([
+        { path: "$.holes[0].regions[0].shape.points", code: testCase.code },
+      ]);
+      expect(result.warnings).toEqual([]);
+    }
+  });
+
   it("accepts a 512 × 512 Boundary and rejects either larger dimension", () => {
     const exact = makeHole();
     exact.boundary.points = [
