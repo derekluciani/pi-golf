@@ -152,8 +152,6 @@ export type ShotDirection = (typeof SHOT_DIRECTIONS)[number];
 
 /** Shared deterministic simulation and normalization rates. */
 export const NUMERIC_RULES = {
-  // Retained only for the pre-V2 Course geometry that V2-T02 owns; new mechanics must not use it.
-  comparisonEpsilon: 1e-6,
   normalizationDecimalPlaces: 6,
   physicsFramesPerSecond: 120,
   playbackFramesPerSecond: 30,

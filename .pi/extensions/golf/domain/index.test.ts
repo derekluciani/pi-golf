@@ -109,7 +109,7 @@ describe("V2-FND-002 shared contracts", () => {
       fullPowerInitialSpeedSquared: 26,
       fullPowerFairwayRollDistance: 26 / 6,
     });
-    expect(NUMERIC_RULES).toMatchObject({
+    expect(NUMERIC_RULES).toEqual({
       normalizationDecimalPlaces: 6,
       physicsFramesPerSecond: 120,
       playbackFramesPerSecond: 30,
