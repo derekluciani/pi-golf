@@ -13,6 +13,8 @@
   "files": [
     ".pi/extensions/golf/index.ts",
     ".pi/extensions/golf/domain/index.ts",
+    ".pi/extensions/golf/domain/clock.ts",
+    "scripts/check-node-version.mjs",
     "scripts/patch-pi-brace-expansion.mjs",
     "README.md",
     ".pi/extensions/golf/course-loader/course.schema.json",
@@ -28,16 +30,21 @@
     "docs/examples/minimal-course.json"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "scripts": {
+    "check:node": "node scripts/check-node-version.mjs",
+    "prelint": "npm run check:node",
     "lint": "eslint .",
+    "pretypecheck": "npm run check:node",
     "typecheck": "tsc --noEmit",
+    "pretest": "npm run check:node",
     "test": "vitest run",
     "postinstall": "node scripts/patch-pi-brace-expansion.mjs"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.82.1",
+    "@earendil-works/pi-tui": "0.82.1",
     "@eslint/js": "10.0.1",
     "@types/node": "22.19.15",
     "brace-expansion": "5.0.8",
