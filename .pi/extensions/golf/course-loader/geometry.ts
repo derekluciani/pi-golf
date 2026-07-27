@@ -1,4 +1,3 @@
-import { NUMERIC_RULES } from "../domain/index.ts";
 import type {
   BoundarySegment,
   CorridorShape,
@@ -8,7 +7,9 @@ import type {
   RegionShape,
 } from "./types.ts";
 
-const EPSILON = NUMERIC_RULES.comparisonEpsilon;
+// V2-T02 owns replacing these unchanged V1 comparisons with predicate-specific robustness.
+// Keep the legacy implementation detail private rather than exposing a forbidden V2 contract.
+const LEGACY_V1_GEOMETRY_EPSILON = 1e-6;
 
 export interface GeometryBounds {
   readonly minX: number;
@@ -87,12 +88,12 @@ function squaredDistance(left: Point, right: Point): number {
 function pointOnSegment(point: Point, start: Point, end: Point): boolean {
   const cross = (point.y - start.y) * (end.x - start.x)
     - (point.x - start.x) * (end.y - start.y);
-  if (Math.abs(cross) > EPSILON) return false;
+  if (Math.abs(cross) > LEGACY_V1_GEOMETRY_EPSILON) return false;
 
-  return point.x >= Math.min(start.x, end.x) - EPSILON
-    && point.x <= Math.max(start.x, end.x) + EPSILON
-    && point.y >= Math.min(start.y, end.y) - EPSILON
-    && point.y <= Math.max(start.y, end.y) + EPSILON;
+  return point.x >= Math.min(start.x, end.x) - LEGACY_V1_GEOMETRY_EPSILON
+    && point.x <= Math.max(start.x, end.x) + LEGACY_V1_GEOMETRY_EPSILON
+    && point.y >= Math.min(start.y, end.y) - LEGACY_V1_GEOMETRY_EPSILON
+    && point.y <= Math.max(start.y, end.y) + LEGACY_V1_GEOMETRY_EPSILON;
 }
 
 /** Boundary points count as inside for validation and Terrain classification. */
@@ -127,20 +128,24 @@ function segmentsIntersect(
   const secondFirstStart = orientation(secondStart, secondEnd, firstStart);
   const secondFirstEnd = orientation(secondStart, secondEnd, firstEnd);
 
-  if (((firstSecondStart > EPSILON && firstSecondEnd < -EPSILON)
-      || (firstSecondStart < -EPSILON && firstSecondEnd > EPSILON))
-    && ((secondFirstStart > EPSILON && secondFirstEnd < -EPSILON)
-      || (secondFirstStart < -EPSILON && secondFirstEnd > EPSILON))) {
+  if (((firstSecondStart > LEGACY_V1_GEOMETRY_EPSILON
+      && firstSecondEnd < -LEGACY_V1_GEOMETRY_EPSILON)
+      || (firstSecondStart < -LEGACY_V1_GEOMETRY_EPSILON
+        && firstSecondEnd > LEGACY_V1_GEOMETRY_EPSILON))
+    && ((secondFirstStart > LEGACY_V1_GEOMETRY_EPSILON
+      && secondFirstEnd < -LEGACY_V1_GEOMETRY_EPSILON)
+      || (secondFirstStart < -LEGACY_V1_GEOMETRY_EPSILON
+        && secondFirstEnd > LEGACY_V1_GEOMETRY_EPSILON))) {
     return true;
   }
 
-  return (Math.abs(firstSecondStart) <= EPSILON
+  return (Math.abs(firstSecondStart) <= LEGACY_V1_GEOMETRY_EPSILON
       && pointOnSegment(secondStart, firstStart, firstEnd))
-    || (Math.abs(firstSecondEnd) <= EPSILON
+    || (Math.abs(firstSecondEnd) <= LEGACY_V1_GEOMETRY_EPSILON
       && pointOnSegment(secondEnd, firstStart, firstEnd))
-    || (Math.abs(secondFirstStart) <= EPSILON
+    || (Math.abs(secondFirstStart) <= LEGACY_V1_GEOMETRY_EPSILON
       && pointOnSegment(firstStart, secondStart, secondEnd))
-    || (Math.abs(secondFirstEnd) <= EPSILON
+    || (Math.abs(secondFirstEnd) <= LEGACY_V1_GEOMETRY_EPSILON
       && pointOnSegment(firstEnd, secondStart, secondEnd));
 }
 
@@ -209,7 +214,8 @@ export function shapeContainsPoint(shape: RegionShape, point: Point): boolean {
     case "ellipse": {
       const normalizedX = (point.x - shape.center.x) / shape.radiusX;
       const normalizedY = (point.y - shape.center.y) / shape.radiusY;
-      return normalizedX * normalizedX + normalizedY * normalizedY <= 1 + EPSILON;
+      return normalizedX * normalizedX + normalizedY * normalizedY
+        <= 1 + LEGACY_V1_GEOMETRY_EPSILON;
     }
     case "corridor": {
       const maximumSquaredDistance = (shape.width / 2) ** 2;
@@ -218,7 +224,7 @@ export function shapeContainsPoint(shape: RegionShape, point: Point): boolean {
         const end = shape.points[index];
         if (start !== undefined && end !== undefined
           && squaredDistanceToSegment(point, start, end)
-            <= maximumSquaredDistance + EPSILON) return true;
+            <= maximumSquaredDistance + LEGACY_V1_GEOMETRY_EPSILON) return true;
       }
       return false;
     }
