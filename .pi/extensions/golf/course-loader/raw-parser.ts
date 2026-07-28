@@ -7,9 +7,20 @@ import type { CourseDiagnostic, CourseValidationResult } from "./types.ts";
 
 class DuplicateScanner {
   private offset = 0;
-  readonly duplicates: CourseDiagnostic[] = [];
+  private duplicateCount = 0;
+  private readonly collectedDuplicates: CourseDiagnostic[] = [];
 
   constructor(private readonly text: string) {}
+
+  get duplicates(): readonly CourseDiagnostic[] {
+    if (this.duplicateCount <= MAX_COURSE_DIAGNOSTICS) return this.collectedDuplicates;
+    const retained = this.collectedDuplicates.slice(0, MAX_COURSE_DIAGNOSTICS - 1);
+    return [...retained, {
+      path: "$",
+      code: "diagnostics-truncated",
+      message: `${this.duplicateCount - retained.length} duplicate-key diagnostics omitted.`,
+    }];
+  }
 
   scan(): void {
     this.skip();
@@ -52,8 +63,11 @@ class DuplicateScanner {
       const key = this.string(); this.skip();
       if (this.text[this.offset++] !== ":") throw new SyntaxError("Expected colon");
       const keyPath = /^[A-Za-z_$][\w$]*$/u.test(key) ? `${path}.${key}` : `${path}[${JSON.stringify(key)}]`;
-      if (keys.has(key) && this.duplicates.length < MAX_COURSE_DIAGNOSTICS) {
-        this.duplicates.push({ path: keyPath, code: "duplicate-key", message: `Duplicate object member at ${keyPath}.` });
+      if (keys.has(key)) {
+        this.duplicateCount += 1;
+        if (this.collectedDuplicates.length < MAX_COURSE_DIAGNOSTICS) {
+          this.collectedDuplicates.push({ path: keyPath, code: "duplicate-key", message: `Duplicate object member at ${keyPath}.` });
+        }
       }
       keys.add(key); this.value(keyPath); this.skip();
       const separator = this.text[this.offset++];

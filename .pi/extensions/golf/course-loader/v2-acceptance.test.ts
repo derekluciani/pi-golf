@@ -6,6 +6,7 @@ import {
   canonicalizeCourseWarnings, createRoundCourseSnapshot, parseCourseJson,
   rasterizeCourse, terrainAtPoint, validateCourse,
 } from "./index.ts";
+import { polygonContainsPoint, shapeContainsPoint } from "./geometry.ts";
 
 function hole(number = 1) {
   return {
@@ -17,6 +18,11 @@ function hole(number = 1) {
 }
 function course(holes: unknown[] = [hole()]) { return { schemaVersion: 1, id: "valid-course", name: "Valid Course", holes }; }
 function errors(input: unknown) { const r = validateCourse(input); return r.ok ? [] : r.errors; }
+function validatedHole(input: unknown) {
+  const result = validateCourse(course([input]));
+  if (!result.ok) throw new Error(`Invalid test fixture: ${JSON.stringify(result.errors)}`);
+  return result.value.holes[0]!;
+}
 
 describe("V2-T02 Course semantics acceptance", () => {
   it("AC-CRS-001-01 closed schema accepts exactly required identities, fields, shapes and Terrain", () => {
@@ -49,6 +55,18 @@ describe("V2-T02 Course semantics acceptance", () => {
     const raw = JSON.stringify(course()).replace('"schemaVersion":1', '"schemaVersion":1,"schemaVersion":1');
     const result = parseCourseJson(raw); expect(result.ok).toBe(false); if (!result.ok) expect(result.errors).toEqual([expect.objectContaining({ code: "duplicate-key", path: "$.schemaVersion" })]);
   });
+  it("AC-CRS-001-03 AC-CRS-002-02 reserves a deterministic truncation slot for duplicate-key diagnostics", () => {
+    const raw = `{${Array.from({ length: 300 }, (_, index) => `"repeated":${index}`).join(",")}}`;
+    const first = parseCourseJson(raw); const second = parseCourseJson(raw);
+    expect(first).toEqual(second); expect(first.ok).toBe(false);
+    if (!first.ok) {
+      expect(first.errors).toHaveLength(MAX_COURSE_DIAGNOSTICS);
+      expect(first.errors.slice(0, -1).every(error => error.code === "duplicate-key")).toBe(true);
+      expect(first.errors.at(-1)).toEqual({
+        path: "$", code: "diagnostics-truncated", message: "44 duplicate-key diagnostics omitted.",
+      });
+    }
+  });
   it("AC-CRS-002-02 aggregates deterministic path-aware blocking diagnostics", () => {
     const input = { ...course(), schemaVersion: 2, id: "BAD", name: " bad " };
     expect(errors(input)).toEqual(errors(input)); expect(errors(input).map(e => e.path)).toEqual(expect.arrayContaining(["$.schemaVersion", "$.id", "$.name"]));
@@ -60,11 +78,52 @@ describe("V2-T02 Course semantics acceptance", () => {
   it("AC-CRS-002-04 keeps raw file and parseCourse(unknown) boundaries distinct", () => {
     expect(parseCourseJson(JSON.stringify(course())).ok).toBe(true); expect(validateCourse(course()).ok).toBe(true);
   });
-  it("AC-CRS-003-01 applies closed shapes, layering, clipping, negative and half-open ownership", () => {
-    const result = validateCourse(course()); if (!result.ok) throw new Error("fixture"); const h = result.value.holes[0]!;
-    expect(terrainAtPoint(h, { x: -1, y: 0 })).toBe("rough");
-    expect(terrainAtPoint(h, { x: -1.0001, y: 0 })).toBe("out-of-bounds");
-    expect(terrainAtPoint(h, { x: 2.9999, y: 2.9999 })).toBe("green");
+  it("AC-CRS-003-01 owns polygon edges and ellipse boundaries as closed geometry", () => {
+    const polygon = { ...hole().boundary, type: "polygon" as const };
+    expect(polygonContainsPoint(polygon, { x: -1, y: 1 })).toBe(true);
+    expect(polygonContainsPoint(polygon, { x: -1.0000000000000002, y: 1 })).toBe(false);
+    const ellipse = { type: "ellipse" as const, center: { x: 0, y: 0 }, radiusX: 2, radiusY: 1 };
+    expect(shapeContainsPoint(ellipse, { x: 2, y: 0 })).toBe(true);
+    expect(shapeContainsPoint(ellipse, { x: 2.0000000000000004, y: 0 })).toBe(false);
+    const h = validatedHole({ ...hole(), regions: [
+      { terrain: "fairway", shape: { type: "ellipse", center: { x: -0.5, y: 0.5 }, radiusX: 1, radiusY: 1 } },
+      hole().regions[0],
+    ] });
+    expect(terrainAtPoint(h, { x: 0.1, y: 0.1 })).toBe("fairway"); // owning center is on ellipse
+
+  });
+  it("AC-CRS-003-01 treats corridors as closed capsule unions including caps and joins", () => {
+    const corridor = { type: "corridor" as const, points: [{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 2 }], width: 2 };
+    expect(shapeContainsPoint(corridor, { x: -1, y: 0 })).toBe(true); // first cap
+    expect(shapeContainsPoint(corridor, { x: 3, y: 0 })).toBe(true); // join's closed disk
+    expect(shapeContainsPoint(corridor, { x: 2, y: 3 })).toBe(true); // final cap
+    expect(shapeContainsPoint(corridor, { x: 3.0000000000000004, y: 0 })).toBe(false);
+    const h = validatedHole({ ...hole(), regions: [
+      { terrain: "fairway", shape: { type: "corridor", points: [{ x: 0.5, y: 0.5 }, { x: 1.5, y: 0.5 }, { x: 1.5, y: 1.5 }], width: 2 } },
+      hole().regions[0],
+    ] });
+    expect(terrainAtPoint(h, { x: -0.1, y: 0.1 })).toBe("fairway"); // cap boundary center
+    expect(terrainAtPoint(h, { x: 2.1, y: 0.1 })).toBe("fairway"); // join boundary center
+
+  });
+  it("AC-CRS-003-01 applies ordered overlap and clips region paint at the Boundary", () => {
+    const h = validatedHole({ ...hole(), regions: [
+      { terrain: "fairway", shape: { type: "polygon", points: [{ x: -2, y: -2 }, { x: 4, y: -2 }, { x: 4, y: 4 }, { x: -2, y: 4 }] } },
+      { terrain: "water", shape: { type: "ellipse", center: { x: 1.5, y: 1.5 }, radiusX: 1, radiusY: 1 } },
+      hole().regions[0],
+    ] });
+    expect(terrainAtPoint(h, { x: 1.1, y: 1.1 })).toBe("water");
+    expect(terrainAtPoint(h, { x: 0.1, y: 0.1 })).toBe("fairway");
+    expect(terrainAtPoint(h, { x: 3.1, y: 1.1 })).toBe("out-of-bounds");
+  });
+  it("AC-CRS-003-01 uses floor ownership for negative coordinates and half-open cells", () => {
+    const h = validatedHole({ ...hole(), regions: [{ terrain: "green", shape: {
+      type: "polygon", points: [{ x: -1, y: -1 }, { x: 0, y: -1 }, { x: 0, y: 0 }, { x: -1, y: 0 }],
+    } }, hole().regions[0]] });
+    expect(terrainAtPoint(h, { x: -1, y: -0.25 })).toBe("green");
+    expect(terrainAtPoint(h, { x: -0.0000000000000001, y: -0.25 })).toBe("green");
+    expect(terrainAtPoint(h, { x: 0, y: -0.25 })).toBe("rough");
+    expect(terrainAtPoint(h, { x: 0.9999999999999999, y: -0.25 })).toBe("rough");
   });
   it("AC-CRS-003-02 rejects continuous sub-cell Green not painting Cup cell", () => {
     const h = hole(); h.cup = { x: 1.1, y: 1.1 }; h.regions = [{ terrain: "green", shape: { type: "ellipse", center: h.cup, radiusX: .2, radiusY: .2 } }];
@@ -74,9 +133,29 @@ describe("V2-T02 Course semantics acceptance", () => {
     const h = hole(); h.boundary.points = [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 0, y: 2 }]; h.tee = { x: .1, y: .1 }; h.cup = { x: 4, y: 0 }; h.regions = [{ terrain: "green", shape: { type: "ellipse", center: h.cup, radiusX: 1, radiusY: 1 } }];
     expect(errors(course([h])).map(e => e.code)).toContain("cup-not-green");
   });
-  it("AC-CRS-003-04 robust predicates work near allowed magnitude without global epsilon", () => {
-    const h = hole(); const o = 999_996; h.boundary.points = [{ x: o, y: 0 }, { x: o + 4, y: 0 }, { x: o + 4, y: 4 }, { x: o, y: 4 }]; h.tee = { x: o + .1, y: .1 }; h.cup = { x: o + 2.1, y: 2.1 }; h.regions[0]!.shape.center = { x: o + 2.5, y: 2.5 };
-    expect(validateCourse(course([h])).ok).toBe(true);
+  it("AC-CRS-003-04 tests ordinary and near-limit polygon predicate boundaries", () => {
+    const ordinary = { type: "polygon" as const, points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] };
+    const nearLimit = { type: "polygon" as const, points: ordinary.points.map(point => ({ x: point.x + 999_996, y: point.y + 999_996 })) };
+    expect(polygonContainsPoint(ordinary, { x: 4, y: 2 })).toBe(true);
+    expect(polygonContainsPoint(ordinary, { x: 4.000000000000001, y: 2 })).toBe(false);
+    expect(polygonContainsPoint(nearLimit, { x: 1_000_000, y: 999_998 })).toBe(true);
+    expect(polygonContainsPoint(nearLimit, { x: 999_995.9999999999, y: 999_998 })).toBe(false);
+  });
+  it("AC-CRS-003-04 tests ordinary and near-limit ellipse predicate boundaries", () => {
+    const ordinary = { type: "ellipse" as const, center: { x: 0, y: 0 }, radiusX: 2, radiusY: 1 };
+    const nearLimit = { ...ordinary, center: { x: 999_998, y: 999_998 } };
+    expect(shapeContainsPoint(ordinary, { x: 0, y: 1 })).toBe(true);
+    expect(shapeContainsPoint(ordinary, { x: 0, y: 1.0000000000000002 })).toBe(false);
+    expect(shapeContainsPoint(nearLimit, { x: 1_000_000, y: 999_998 })).toBe(true);
+    expect(shapeContainsPoint(nearLimit, { x: 999_995.9999999999, y: 999_998 })).toBe(false);
+  });
+  it("AC-CRS-003-04 tests ordinary and near-limit corridor predicate boundaries", () => {
+    const ordinary = { type: "corridor" as const, points: [{ x: 0, y: 0 }, { x: 2, y: 0 }], width: 2 };
+    const nearLimit = { ...ordinary, points: [{ x: 999_996, y: 999_998 }, { x: 999_999, y: 999_998 }] };
+    expect(shapeContainsPoint(ordinary, { x: 1, y: 1 })).toBe(true);
+    expect(shapeContainsPoint(ordinary, { x: 1, y: 1.0000000000000002 })).toBe(false);
+    expect(shapeContainsPoint(nearLimit, { x: 999_998, y: 999_999 })).toBe(true);
+    expect(shapeContainsPoint(nearLimit, { x: 999_998, y: 999_999.0000000001 })).toBe(false);
   });
   it("AC-CRS-004-01 repeated raster is typed deeply equal row-major", () => { const r = validateCourse(course()); if (!r.ok) throw new Error("fixture"); expect(rasterizeCourse(r.value)).toEqual(rasterizeCourse(r.value)); });
   it("AC-CRS-004-02 emits exactly one warning only for each no-cell region", () => {
