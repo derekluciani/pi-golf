@@ -14,7 +14,14 @@ export const HOLE_REQUIRED_PROPERTIES = [
 export const REGION_REQUIRED_PROPERTIES = ["terrain", "shape"] as const;
 export const SHAPE_TYPES = ["polygon", "ellipse", "corridor"] as const;
 export const MAX_HOLES = 18;
+export const MAX_REGIONS_PER_HOLE = 128;
+export const MAX_POINTS_PER_SHAPE = 1_024;
 export const MAX_BOUNDARY_EXTENT = 512;
+export const MAX_TOTAL_RASTER_CELLS = 2_000_000;
+export const MAX_COURSE_JSON_BYTES = 1_048_576;
+export const MAX_COURSE_DIAGNOSTICS = 256;
+export const COURSE_ID_PATTERN = "^[a-z0-9](?:[a-z0-9._-]{0,63})$";
+export const COURSE_NAME_PATTERN = "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]{1,30}$";
 /** Inclusive magnitude limit for every coordinate and upper limit for positive dimensions. */
 export const MAX_GEOMETRY_MAGNITUDE = 1_000_000;
 
@@ -43,8 +50,8 @@ export const COURSE_SCHEMA = {
   required: COURSE_REQUIRED_PROPERTIES,
   properties: {
     schemaVersion: { const: COURSE_SCHEMA_VERSION },
-    id: { type: "string", minLength: 1, pattern: "\\S" },
-    name: { type: "string", minLength: 1, pattern: "\\S" },
+    id: { type: "string", minLength: 1, maxLength: 64, pattern: COURSE_ID_PATTERN },
+    name: { type: "string", minLength: 1, maxLength: 30, pattern: COURSE_NAME_PATTERN },
     holes: {
       type: "array",
       minItems: 1,
@@ -71,6 +78,7 @@ export const COURSE_SCHEMA = {
         points: {
           type: "array",
           minItems: 3,
+          maxItems: MAX_POINTS_PER_SHAPE,
           items: { $ref: "#/$defs/point" },
         },
       },
@@ -95,6 +103,7 @@ export const COURSE_SCHEMA = {
         points: {
           type: "array",
           minItems: 2,
+          maxItems: MAX_POINTS_PER_SHAPE,
           items: { $ref: "#/$defs/point" },
         },
         width: positiveDimensionSchema,
@@ -120,7 +129,7 @@ export const COURSE_SCHEMA = {
       additionalProperties: false,
       required: HOLE_REQUIRED_PROPERTIES,
       properties: {
-        id: { type: "string", minLength: 1, pattern: "\\S" },
+        id: { type: "string", minLength: 1, maxLength: 64, pattern: COURSE_ID_PATTERN },
         number: { type: "integer", minimum: 1, maximum: 18 },
         par: { type: "integer", minimum: 3, maximum: 5 },
         boundary: { $ref: "#/$defs/polygon" },
@@ -128,6 +137,7 @@ export const COURSE_SCHEMA = {
         cup: { $ref: "#/$defs/point" },
         regions: {
           type: "array",
+          maxItems: MAX_REGIONS_PER_HOLE,
           items: { $ref: "#/$defs/region" },
         },
       },

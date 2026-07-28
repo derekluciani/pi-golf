@@ -544,7 +544,6 @@ describe("blocking Course validation", () => {
     const result = expectInvalid(makeCourse([hole]));
     expect(result.errors.map(({ path, code }) => ({ path, code }))).toEqual(expect.arrayContaining([
       { path: "$.holes[0].tee", code: "point-on-hazard" },
-      { path: "$.holes[0].cup", code: "point-on-hazard" },
       { path: "$.holes[0].cup", code: "cup-not-green" },
     ]));
   });

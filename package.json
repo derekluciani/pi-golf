@@ -21,9 +21,12 @@
     ".pi/extensions/golf/course-loader/geometry.ts",
     ".pi/extensions/golf/course-loader/index.ts",
     ".pi/extensions/golf/course-loader/rasterizer.ts",
+    ".pi/extensions/golf/course-loader/raw-parser.ts",
     ".pi/extensions/golf/course-loader/schema.ts",
+    ".pi/extensions/golf/course-loader/snapshot.ts",
     ".pi/extensions/golf/course-loader/types.ts",
     ".pi/extensions/golf/course-loader/validation.ts",
+    ".pi/extensions/golf/course-loader/warnings.ts",
     ".pi/extensions/golf/courses/index.ts",
     ".pi/extensions/golf/courses/preview-course.json",
     "docs/course-format.md",
@@ -54,6 +57,7 @@
     "vitest": "3.2.7"
   },
   "dependencies": {
-    "ajv": "8.20.0"
+    "ajv": "8.20.0",
+    "robust-predicates": "^3.0.2"
   }
 }

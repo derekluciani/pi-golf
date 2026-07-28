@@ -17,12 +17,14 @@
     "id": {
       "type": "string",
       "minLength": 1,
-      "pattern": "\\S"
+      "maxLength": 64,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,63})$"
     },
     "name": {
       "type": "string",
       "minLength": 1,
-      "pattern": "\\S"
+      "maxLength": 30,
+      "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]{1,30}$"
     },
     "holes": {
       "type": "array",
@@ -70,7 +72,8 @@
           "minItems": 3,
           "items": {
             "$ref": "#/$defs/point"
-          }
+          },
+          "maxItems": 1024
         }
       }
     },
@@ -119,7 +122,8 @@
           "minItems": 2,
           "items": {
             "$ref": "#/$defs/point"
-          }
+          },
+          "maxItems": 1024
         },
         "width": {
           "type": "number",
@@ -176,7 +180,8 @@
         "id": {
           "type": "string",
           "minLength": 1,
-          "pattern": "\\S"
+          "maxLength": 64,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,63})$"
         },
         "number": {
           "type": "integer",
@@ -201,7 +206,8 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/region"
-          }
+          },
+          "maxItems": 128
         }
       }
     }
