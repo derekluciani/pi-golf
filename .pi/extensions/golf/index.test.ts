@@ -1,4 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
@@ -27,6 +29,19 @@ describe("V2-FND-001 project-local extension foundation", () => {
       "golf",
       expect.objectContaining({ description: "Open Pi Golf.", handler: expect.any(Function) }),
     );
+  });
+
+  it("AC-PER-001-03 / AC-PER-001-04 mirrors durable first-action start to the real Pi custom branch-entry shape", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-golf-branch-seam-"));
+    try {
+      const registerCommand = vi.fn();
+      const appendEntry = vi.fn();
+      registerGolfExtension({ registerCommand, appendEntry } as unknown as ExtensionAPI);
+      const handler = registerCommand.mock.calls[0]?.[1].handler as ((args: string, ctx: unknown) => Promise<void>) | undefined;
+      if (handler === undefined) throw new Error("Golf handler was not registered.");
+      await handler("", { cwd: root, sessionManager: { getSessionId: () => "branch-a", getBranch: () => [] }, ui: { notify: vi.fn() } });
+      expect(appendEntry).toHaveBeenCalledWith("pi-golf-round-v1", expect.objectContaining({ roundId: expect.any(String), revision: 0 }));
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("AC-FND-001-02 declares and enforces Node >=22.19.0", async () => {
