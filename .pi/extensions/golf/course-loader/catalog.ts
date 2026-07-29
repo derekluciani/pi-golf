@@ -133,9 +133,16 @@ function compareWarnings(left: CourseCatalogWarning, right: CourseCatalogWarning
  * selected external source wins its ID; otherwise ambiguous IDs have no winner.
  */
 export function reconcileCourseCatalog(input: CourseCatalogInput): CourseCatalog {
+  // A persisted locator that failed integrity validation is not merely a failed
+  // selection: it is excluded from this reconciliation pass.  Otherwise an
+  // ID-changed file could immediately reappear under its new identity.
+  const rejectedSelectedSources = new Set(input.selectedSnapshot.warnings.flatMap((warning) =>
+    "loadIssue" in warning && (warning.code === "selected-course-id-mismatch" || warning.code === "selected-course-unavailable")
+      ? [warning.sourcePath]
+      : []));
   const discoveredBySource = new Map<string, LoadedCourseFile>();
   for (const candidate of [...input.discovery.courses].sort(compareCandidates)) {
-    if (!discoveredBySource.has(candidate.sourcePath)) {
+    if (!rejectedSelectedSources.has(candidate.sourcePath) && !discoveredBySource.has(candidate.sourcePath)) {
       discoveredBySource.set(candidate.sourcePath, candidate);
     }
   }

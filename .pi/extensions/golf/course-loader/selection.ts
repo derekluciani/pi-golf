@@ -1,4 +1,5 @@
 import { isAbsolute, resolve } from "node:path";
+import { realpath } from "node:fs/promises";
 
 import { loadPreviewCourse } from "../courses/index.ts";
 import {
@@ -126,13 +127,13 @@ export async function selectCourseFromPath(
   cwd: string,
   suppliedPath: string,
 ): Promise<ExplicitCourseSelectionResult> {
-  const sourcePath = isAbsolute(suppliedPath) ? resolve(suppliedPath) : resolve(cwd, suppliedPath);
-  const loaded = await loadSelectableCourseFile(sourcePath);
-  if (!loaded.ok) return { ok: false, sourcePath, issue: loaded.issue };
-
+  const suppliedAbsolutePath = isAbsolute(suppliedPath) ? resolve(suppliedPath) : resolve(cwd, suppliedPath);
+  const loaded = await loadSelectableCourseFile(suppliedAbsolutePath);
+  if (!loaded.ok) return { ok: false, sourcePath: suppliedAbsolutePath, issue: loaded.issue };
+  // loadSelectableCourseFile's stable read is the authority for canonical identity.
   const settings: CourseSettings = {
     selectedCourseId: loaded.value.course.id,
-    sourcePath,
+    sourcePath: loaded.value.sourcePath,
   };
   await writeCourseSettings(cwd, settings);
   return { ok: true, selected: loaded.value, settings };
@@ -143,9 +144,12 @@ export async function selectLoadedCourse(
   cwd: string,
   selected: LoadedCourseFile | "preview",
 ): Promise<CourseSettings> {
+  if (selected !== "preview" && selected.course.id === PREVIEW_COURSE_ID) {
+    throw new Error("Refusing to persist an external Course using Preview Course identity.");
+  }
   const settings = selected === "preview"
     ? PREVIEW_COURSE_SETTINGS
-    : { selectedCourseId: selected.course.id, sourcePath: selected.sourcePath };
+    : { selectedCourseId: selected.course.id, sourcePath: await realpath(selected.sourcePath) };
   await writeCourseSettings(cwd, settings);
   return settings;
 }

@@ -1,6 +1,6 @@
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 
 export const MAX_SETTINGS_BYTES = 16 * 1024;
 import { dirname, isAbsolute, join } from "node:path";
@@ -40,6 +40,29 @@ export interface CourseSettingsReadResult {
   readonly settings: CourseSettings;
   readonly warning: CourseSettingsIssue | undefined;
   readonly exists: boolean;
+}
+
+/** Testable interruption seam; production callers do not provide hooks. */
+export interface CourseSettingsWriteHooks {
+  readonly beforeRename?: (temporaryPath: string) => Promise<void> | void;
+}
+
+async function readBoundedFile(path: string, maximumBytes: number): Promise<Uint8Array> {
+  const handle = await open(path, "r");
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size > maximumBytes) throw new Error("file exceeds bound");
+    const bytes = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.byteLength - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    const after = await handle.stat();
+    if (offset !== bytes.byteLength || after.size !== metadata.size || after.mtimeMs !== metadata.mtimeMs) throw new Error("file changed while read");
+    return bytes;
+  } finally { await handle.close(); }
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -87,8 +110,7 @@ export async function readCourseSettings(cwd: string): Promise<CourseSettingsRea
   const { settingsPath } = getCourseProjectPaths(cwd);
   let text: string;
   try {
-    const bytes = await readFile(settingsPath);
-    if (bytes.byteLength > MAX_SETTINGS_BYTES) throw new Error("settings too large");
+    const bytes = await readBoundedFile(settingsPath, MAX_SETTINGS_BYTES);
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch (error) {
     if (hasErrorCode(error, "ENOENT")) {
@@ -135,9 +157,32 @@ export async function readCourseSettings(cwd: string): Promise<CourseSettingsRea
 }
 
 const pendingWrites = new Map<string, Promise<void>>();
+const LOCK_RETRY_COUNT = 100;
+const LOCK_RETRY_MILLISECONDS = 5;
 
-async function writeSettingsAtomically(settingsPath: string, settings: CourseSettings): Promise<void> {
+function pause(milliseconds: number): Promise<void> {
+  return new Promise((resolvePause) => { setTimeout(resolvePause, milliseconds); });
+}
+
+/** An exclusive same-directory lock coordinates separately loaded extension runtimes. */
+async function acquireSettingsLock(settingsPath: string): Promise<() => Promise<void>> {
+  const lockPath = `${settingsPath}.lock`;
+  for (let attempt = 0; attempt < LOCK_RETRY_COUNT; attempt += 1) {
+    try {
+      const lock = await open(lockPath, "wx");
+      await lock.close();
+      return async () => { await rm(lockPath, { force: true }); };
+    } catch (error: unknown) {
+      if (!hasErrorCode(error, "EEXIST")) throw error;
+      await pause(LOCK_RETRY_MILLISECONDS);
+    }
+  }
+  throw new Error("Timed out waiting to write Golf settings.");
+}
+
+async function writeSettingsAtomically(settingsPath: string, settings: CourseSettings, hooks: CourseSettingsWriteHooks): Promise<void> {
   await mkdir(dirname(settingsPath), { recursive: true });
+  const releaseLock = await acquireSettingsLock(settingsPath);
   const temporaryPath = `${settingsPath}.${process.pid}.${randomUUID()}.tmp`;
   const contents = `${JSON.stringify(settings, null, 2)}\n`;
   if (Buffer.byteLength(contents, "utf8") > MAX_SETTINGS_BYTES) throw new Error("Golf settings exceed 16 KiB.");
@@ -153,6 +198,7 @@ async function writeSettingsAtomically(settingsPath: string, settings: CourseSet
     await temporaryFile.sync();
     await temporaryFile.close();
     temporaryFile = undefined;
+    await hooks.beforeRename?.(temporaryPath);
     await rename(temporaryPath, settingsPath);
     // Best effort: some platforms do not permit opening/syncing directories.
     const directory = await open(dirname(settingsPath), "r").catch(() => undefined);
@@ -161,6 +207,7 @@ async function writeSettingsAtomically(settingsPath: string, settings: CourseSet
   } finally {
     await temporaryFile?.close().catch(() => undefined);
     if (ownsTemporaryPath) await rm(temporaryPath, { force: true });
+    await releaseLock();
   }
 }
 
@@ -168,12 +215,12 @@ async function writeSettingsAtomically(settingsPath: string, settings: CourseSet
  * Serializes writes from this runtime and commits each complete JSON document
  * through a uniquely owned same-directory temporary file and atomic rename.
  */
-export async function writeCourseSettings(cwd: string, settings: CourseSettings): Promise<void> {
+export async function writeCourseSettings(cwd: string, settings: CourseSettings, hooks: CourseSettingsWriteHooks = {}): Promise<void> {
   if (!isCourseSettings(settings)) throw new Error("Refusing to persist invalid Golf settings.");
   const { settingsPath } = getCourseProjectPaths(cwd);
   const previous = pendingWrites.get(settingsPath) ?? Promise.resolve();
   const current = previous.catch(() => undefined).then(async () => {
-    await writeSettingsAtomically(settingsPath, settings);
+    await writeSettingsAtomically(settingsPath, settings, hooks);
   });
   pendingWrites.set(settingsPath, current);
   try {

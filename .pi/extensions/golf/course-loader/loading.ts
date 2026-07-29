@@ -1,5 +1,5 @@
-import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
-import type { Dirent } from "node:fs";
+import { lstat, open, readdir, realpath, stat } from "node:fs/promises";
+import type { Dirent, Stats } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
 
 import { MAX_COURSE_JSON_BYTES } from "./schema.ts";
@@ -19,22 +19,40 @@ export interface CourseDiscoveryResult { readonly courses: readonly LoadedCourse
 
 function issue(code: CourseLoadIssueCode, sourcePath: string, message: string, diagnostics: readonly CourseDiagnostic[] = [], warnings: readonly CourseWarning[] = []): CourseLoadIssue { return { code, sourcePath, message, diagnostics, warnings }; }
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
-function sameMetadata(left: Awaited<ReturnType<typeof stat>>, right: Awaited<ReturnType<typeof stat>>): boolean { return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs && left.mode === right.mode; }
+function sameMetadata(left: Stats, right: Stats): boolean { return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs && left.mode === right.mode; }
 
-/** Bounded regular-file read linearized by metadata before and after its bytes. */
+/**
+ * Reads through one descriptor, with both descriptor fstats and a final name
+ * resolution check.  The buffer is sized from the pre-read fstat, so a writer
+ * which grows a file can never make this reader allocate past the Course limit.
+ */
 export async function readStableCourseFile(path: string): Promise<{ readonly ok: true; readonly sourcePath: string; readonly bytes: Uint8Array } | { readonly ok: false; readonly issue: CourseLoadIssue }> {
   let sourcePath: string;
   try { sourcePath = await realpath(path); } catch { return { ok: false, issue: issue("unreadable-course", resolve(path), `Cannot canonicalize Course file: ${resolve(path)}`) }; }
   for (let attempt = 0; attempt < MAX_STABLE_READ_RETRIES; attempt += 1) {
-    let before: Awaited<ReturnType<typeof stat>>;
-    try { before = await stat(sourcePath); } catch { return { ok: false, issue: issue("unreadable-course", sourcePath, `Cannot read Course file: ${sourcePath}`) }; }
-    if (!before.isFile()) return { ok: false, issue: issue("not-regular-course", sourcePath, `Course source is not a regular file: ${sourcePath}`) };
-    if (before.size > MAX_COURSE_JSON_BYTES) return { ok: false, issue: issue("too-large-course", sourcePath, `Course JSON exceeds ${MAX_COURSE_JSON_BYTES} bytes: ${sourcePath}`) };
-    let bytes: Uint8Array;
-    try { bytes = await readFile(sourcePath); } catch { return { ok: false, issue: issue("unreadable-course", sourcePath, `Cannot read Course file: ${sourcePath}`) }; }
-    let after: Awaited<ReturnType<typeof stat>>;
-    try { after = await stat(sourcePath); } catch { continue; }
-    if (bytes.byteLength <= MAX_COURSE_JSON_BYTES && sameMetadata(before, after)) return { ok: true, sourcePath, bytes };
+    let handle: Awaited<ReturnType<typeof open>>;
+    try { handle = await open(sourcePath, "r"); } catch { return { ok: false, issue: issue("unreadable-course", sourcePath, `Cannot read Course file: ${sourcePath}`) }; }
+    try {
+      const before = await handle.stat();
+      if (!before.isFile()) return { ok: false, issue: issue("not-regular-course", sourcePath, `Course source is not a regular file: ${sourcePath}`) };
+      if (before.size > MAX_COURSE_JSON_BYTES) return { ok: false, issue: issue("too-large-course", sourcePath, `Course JSON exceeds ${MAX_COURSE_JSON_BYTES} bytes: ${sourcePath}`) };
+      const bytes = Buffer.alloc(before.size);
+      let offset = 0;
+      while (offset < bytes.byteLength) {
+        const result = await handle.read(bytes, offset, bytes.byteLength - offset, offset);
+        if (result.bytesRead === 0) break;
+        offset += result.bytesRead;
+      }
+      const after = await handle.stat();
+      let named: Stats;
+      let canonicalAfter: string;
+      try { [named, canonicalAfter] = await Promise.all([stat(sourcePath), realpath(path)]); } catch { continue; }
+      if (offset === bytes.byteLength && sameMetadata(before, after) && sameMetadata(before, named) && canonicalAfter === sourcePath) {
+        return { ok: true, sourcePath, bytes };
+      }
+    } catch {
+      return { ok: false, issue: issue("unreadable-course", sourcePath, `Cannot read Course file: ${sourcePath}`) };
+    } finally { await handle.close().catch(() => undefined); }
   }
   return { ok: false, issue: issue("unstable-course", sourcePath, `Course file changed while being read: ${sourcePath}`) };
 }
@@ -68,7 +86,7 @@ export async function discoverCourses(directory: string): Promise<CourseDiscover
       let canonical: string;
       try { canonical = await realpath(entryPath); } catch { warn(issue("unreadable-course", entryPath, `Cannot canonicalize discovery entry: ${entryPath}`)); continue; }
       if (!within(root, canonical)) { warn(issue("outside-discovery-root", entryPath, `Discovery symlink escapes Course root: ${entryPath}`)); continue; }
-      let info: Awaited<ReturnType<typeof lstat>>;
+      let info: Stats;
       try { info = await lstat(entryPath); } catch { warn(issue("unreadable-course", entryPath, `Cannot inspect Course discovery entry: ${entryPath}`)); continue; }
       const target = await stat(canonical).catch(() => undefined);
       if (target?.isDirectory()) { if (depth < MAX_DISCOVERY_DEPTH) await walk(canonical, depth + 1); else warn(issue("unreadable-directory", entryPath, `Course discovery depth exceeds ${MAX_DISCOVERY_DEPTH}: ${entryPath}`)); continue; }
