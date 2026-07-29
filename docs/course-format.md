@@ -142,17 +142,22 @@ Validation never repairs input. Fix the reported JSON paths in the authority fil
 
 1. Copy and edit [`minimal-course.json`](examples/minimal-course.json), or edit the bundled [Preview Course](../.pi/extensions/golf/courses/preview-course.json).
 2. Configure an editor or JSON Schema validator to validate the file directly against [`course.schema.json`](../.pi/extensions/golf/course-loader/course.schema.json). This catches structural errors before runtime.
-3. Parse file text as `unknown` and pass it to the exported `parseCourse()` API. Runtime validation adds path-aware geometry, placement, and layering rules that JSON Schema cannot express.
-4. Only after successful parsing, pass the returned Course to the exported `rasterizeCourse()` API.
+3. Pass raw file text or bytes to the exported `parseCourseJson()` API. It rejects duplicate object members before JSON decoding and then applies path-aware structural, geometry, placement, and layering validation. Do not use `JSON.parse()` for Course files because it silently discards duplicate members.
+4. `parseCourse(unknown)` remains available only for already-parsed programmatic input that did not originate from a Course file.
+5. Only after successful parsing, pass the returned Course to the exported `rasterizeCourse()` API.
 
 ```ts
-const input: unknown = JSON.parse(jsonText);
-const result = parseCourse(input);
+const result = parseCourseJson(jsonText);
 if (!result.ok) {
   console.error(result.errors);
 } else {
   const raster = rasterizeCourse(result.value);
 }
+```
+
+```ts
+// Programmatic input only; raw Course files must use parseCourseJson().
+const result = parseCourse(programmaticInput);
 ```
 
 `npm test` validates both shipped JSON artifacts through runtime validation and directly against the checked-in static schema. It also compares that static schema exactly with the runtime schema definition, so schema drift fails the test suite.

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_COURSE_DIAGNOSTICS, MAX_COURSE_JSON_BYTES, MAX_POINTS_PER_SHAPE,
+  MAX_REGIONS_PER_HOLE, MAX_TOTAL_RASTER_CELLS,
   canonicalizeCourseWarnings, createRoundCourseSnapshot, parseCourseJson,
   rasterizeCourse, terrainAtPoint, validateCourse,
 } from "./index.ts";
@@ -49,6 +50,54 @@ describe("V2-T02 Course semantics acceptance", () => {
     expect(errors(course([tooManyRegions])).map(e => e.path)).toContain("$.holes[0].regions");
     const noisy = { schemaVersion: 9, id: "", name: "", holes: Array.from({ length: 18 }, () => ({})), ...Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`x${i}`, i])) };
     const capped = errors(noisy); expect(capped).toHaveLength(MAX_COURSE_DIAGNOSTICS); expect(capped.at(-1)?.code).toBe("diagnostics-truncated");
+  });
+  it("AC-CRS-001-03 accepts each exact resource limit and rejects one over", () => {
+    const regularPolygon = (count: number) => Array.from({ length: count }, (_, index) => {
+      const angle = (2 * Math.PI * index) / count;
+      return { x: 1.5 + Math.cos(angle) * 0.25, y: 1.5 + Math.sin(angle) * 0.25 };
+    });
+    const corridorPoints = (count: number) => Array.from({ length: count }, (_, index) => ({
+      x: 0.1 + index / count,
+      y: 0.1 + index / count,
+    }));
+    const withShape = (shape: unknown) => course([{
+      ...hole(),
+      regions: [{ terrain: "fairway", shape }, hole().regions[0]!],
+    }]);
+
+    expect(validateCourse(withShape({ type: "polygon", points: regularPolygon(MAX_POINTS_PER_SHAPE) })).ok).toBe(true);
+    expect(errors(withShape({ type: "polygon", points: regularPolygon(MAX_POINTS_PER_SHAPE + 1) })).map(error => error.path)).toContain("$.holes[0].regions[0].shape.points");
+    expect(validateCourse(withShape({ type: "corridor", points: corridorPoints(MAX_POINTS_PER_SHAPE), width: 0.01 })).ok).toBe(true);
+    expect(errors(withShape({ type: "corridor", points: corridorPoints(MAX_POINTS_PER_SHAPE + 1), width: 0.01 })).map(error => error.path)).toContain("$.holes[0].regions[0].shape.points");
+
+    const maxRegions = hole();
+    maxRegions.regions = Array.from({ length: MAX_REGIONS_PER_HOLE }, (_, index) => index === MAX_REGIONS_PER_HOLE - 1
+      ? maxRegions.regions[0]!
+      : { terrain: "fairway", shape: { type: "ellipse", center: { x: 0.1, y: 0.1 }, radiusX: 0.01, radiusY: 0.01 } });
+    expect(validateCourse(course([maxRegions])).ok).toBe(true);
+    maxRegions.regions = [...maxRegions.regions, maxRegions.regions[0]!];
+    expect(errors(course([maxRegions])).map(error => error.path)).toContain("$.holes[0].regions");
+
+    const resourceHole = (number: number, width: number, height: number) => ({
+      ...hole(number),
+      boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: width, y: 0 }, { x: width, y: height }, { x: 0, y: height }] },
+      tee: { x: 0.1, y: 0.1 }, cup: { x: 0.5, y: 0.5 },
+      regions: [{ terrain: "green", shape: { type: "ellipse", center: { x: 0.5, y: 0.5 }, radiusX: 0.6, radiusY: 0.6 } }],
+    });
+    const exactRasterHoles = [
+      ...Array.from({ length: 7 }, (_, index) => resourceHole(index + 1, 500, 500)),
+      resourceHole(8, 499, 501), resourceHole(9, 1, 1),
+    ];
+    expect(MAX_TOTAL_RASTER_CELLS).toBe(2_000_000);
+    expect(validateCourse(course(exactRasterHoles)).ok).toBe(true);
+    const oneOverRasterHoles = [...exactRasterHoles.slice(0, -1), resourceHole(9, 1, 2)];
+    expect(errors(course(oneOverRasterHoles)).map(error => error.code)).toContain("raster-limit-exceeded");
+
+    const serialized = JSON.stringify(course());
+    const exactBytes = `${serialized}${" ".repeat(MAX_COURSE_JSON_BYTES - Buffer.byteLength(serialized, "utf8"))}`;
+    expect(Buffer.byteLength(exactBytes, "utf8")).toBe(MAX_COURSE_JSON_BYTES);
+    expect(parseCourseJson(exactBytes).ok).toBe(true);
+    expect(parseCourseJson(`${exactBytes} `).ok).toBe(false);
   });
   it("AC-CRS-001-04 schema equivalence is locked by schema.test.ts", () => expect(true).toBe(true));
   it("AC-CRS-002-01 duplicate-aware raw parsing rejects duplicate members first", () => {
