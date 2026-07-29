@@ -12,6 +12,7 @@
   },
   "files": [
     ".pi/extensions/golf/index.ts",
+    ".pi/extensions/golf/persistence/index.ts",
     ".pi/extensions/golf/domain/index.ts",
     ".pi/extensions/golf/domain/clock.ts",
     ".pi/extensions/golf/simulation/**",
