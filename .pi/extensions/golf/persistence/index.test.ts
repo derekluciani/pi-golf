@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { PersistedRoundState } from "../domain/index.ts";
-import { appendRoundReplacement, GOLF_ENTRY_MIGRATIONS, GOLF_BRANCH_REFERENCE_TYPE, RoundMutationWriter, RoundStore, parseGolfEntry, reconstructActiveBranch, reconstructRound, type BranchEntryLike, type GolfEntryV1 } from "./index.ts";
+import { appendRoundReplacement, GOLF_ENTRY_MIGRATIONS, GOLF_BRANCH_REFERENCE_TYPE, RoundMutationWriter, RoundStore, parseGolfEntry, reconstructActiveBranch, reconstructRound, type BranchEntryLike, type GolfEntryV1, type WriteBoundary } from "./index.ts";
 
 const snapshot = JSON.stringify({ schemaVersion: 1, id: "tiny", name: "Tiny", holes: [{ id: "tiny-hole", number: 1, par: 3, boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] }, tee: { x: 1, y: 1 }, cup: { x: 2, y: 2 }, regions: [{ terrain: "green", shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] } }] }] });
 const state = (status: PersistedRoundState["status"] = "active", lie = { x: 1, y: 1 }): PersistedRoundState => ({ kind: "persisted-round", courseId: "tiny" as PersistedRoundState["courseId"], currentHoleIndex: 0 as PersistedRoundState["currentHoleIndex"], lie, selectedClub: "driver", shotDirectionIndex: 0 as PersistedRoundState["shotDirectionIndex"], holeScores: [], status });
@@ -49,56 +49,61 @@ describe("V2-PER durable Round store", () => {
     expect(reconstructRound([start(), cupShot(), terminal])).toMatchObject({ lifecycle: "round-summary", terminal: true });
     expect(() => reconstructRound([start(), terminal, shot(3)])).toThrow();
   });
-  it("AC-PER-004-02 deterministically reconstructs multi-Hole interruption/retry boundaries with each Score and Shot exactly once", async () => {
-    const { root, store } = await fixture();
-    try {
-      const holeOneSummary = multiState(0, { x: 2, y: 2 }, [firstScore]);
-      const holeTwoAiming = multiState(1, { x: 6, y: 1 }, [firstScore]);
-      const finalHoleSummary = multiState(1, { x: 7, y: 2 }, [firstScore, secondScore]);
-      const finalRoundSummary = multiState(1, { x: 7, y: 2 }, [firstScore, secondScore], "complete");
-      const entries: readonly GolfEntryV1[] = [
-        multiStart(),
-        multiCupShot(1, "multi-cup-one", { x: 1, y: 1 }, { x: 2, y: 2 }, holeOneSummary),
-        { entryVersion: 1, roundId: "multi-round", revision: 2, kind: "checkpoint", payload: { state: holeTwoAiming, lifecycle: "aiming" } },
-        multiCupShot(3, "multi-cup-two", { x: 6, y: 1 }, { x: 7, y: 2 }, finalHoleSummary),
-        { entryVersion: 1, roundId: "multi-round", revision: 4, kind: "round-terminal", payload: { status: "complete", state: finalRoundSummary } },
-      ];
-      const assertAuthoritative = async (revision: number, lifecycle: "aiming" | "hole-summary" | "round-summary", holeIndex: number, score: number, shots: number, terminal = false): Promise<void> => {
-        const recovered = await store.read("multi-round");
-        expect(recovered).toMatchObject({ revision, lifecycle, terminal, state: { currentHoleIndex: holeIndex } });
-        expect(recovered.state.holeScores).toHaveLength(score);
-        expect(new Set(recovered.state.holeScores.map((hole) => hole.hole.id)).size).toBe(score);
-        expect(recovered.state.holeScores.reduce((total, hole) => total + hole.playedStrokes + hole.penaltyStrokes, 0)).toBe(score);
-        const durable = await Promise.all(Array.from({ length: revision + 1 }, (_, index) => store.entryAt("multi-round", index)));
+  it("AC-PER-004-02 injects deterministic multi-Hole faults at Cup, summary, advancement, and terminal boundaries", async () => {
+    const holeOneSummary = multiState(0, { x: 2, y: 2 }, [firstScore]);
+    const holeTwoAiming = multiState(1, { x: 6, y: 1 }, [firstScore]);
+    const finalHoleSummary = multiState(1, { x: 7, y: 2 }, [firstScore, secondScore]);
+    const finalRoundSummary = multiState(1, { x: 7, y: 2 }, [firstScore, secondScore], "complete");
+    const entries: readonly GolfEntryV1[] = [
+      multiStart(),
+      multiCupShot(1, "multi-cup-one", { x: 1, y: 1 }, { x: 2, y: 2 }, holeOneSummary),
+      { entryVersion: 1, roundId: "multi-round", revision: 2, kind: "checkpoint", payload: { state: holeOneSummary, lifecycle: "hole-summary" } },
+      { entryVersion: 1, roundId: "multi-round", revision: 3, kind: "checkpoint", payload: { state: holeTwoAiming, lifecycle: "aiming" } },
+      multiCupShot(4, "multi-cup-two", { x: 6, y: 1 }, { x: 7, y: 2 }, finalHoleSummary),
+      { entryVersion: 1, roundId: "multi-round", revision: 5, kind: "round-terminal", payload: { status: "complete", state: finalRoundSummary } },
+    ];
+    const cases = [
+      { name: "before Cup playback", index: 1, phase: "before" },
+      { name: "after Cup playback", index: 1, phase: "after" },
+      { name: "Hole summary", index: 2, phase: "before" },
+      { name: "Hole advancement", index: 3, phase: "after" },
+      { name: "final Cup summary", index: 4, phase: "before" },
+      { name: "final summary terminal", index: 5, phase: "after" },
+    ] as const;
+    const lifecycle = ["aiming", "hole-summary", "hole-summary", "aiming", "hole-summary", "round-summary"] as const;
+    for (const fault of cases) {
+      const { root, store } = await fixture();
+      try {
+        for (let index = 0; index < fault.index; index += 1) { const entry = entries[index]; if (entry === undefined) throw new Error("Missing multi-Hole fixture entry."); await store.append(entry); }
+        let injected = false;
+        const interrupted = new RoundStore({ root: join(root, ".pi/golf/rounds"), [fault.phase === "before" ? "beforeWrite" : "afterWrite"]: (boundary: WriteBoundary) => {
+          if (!injected && boundary === "write") { injected = true; throw new Error(`interrupt-${fault.name}`); }
+        } });
+        const interruptedEntry = entries[fault.index]; if (interruptedEntry === undefined) throw new Error("Missing interrupted fixture entry.");
+        await expect(interrupted.append(interruptedEntry)).rejects.toThrow(`interrupt-${fault.name}`);
+        const reconstructed = new RoundStore({ root: join(root, ".pi/golf/rounds") });
+        const committedRevision = fault.phase === "after" ? fault.index : fault.index - 1;
+        const committed = await reconstructed.read("multi-round");
+        expect(committed).toMatchObject({ revision: committedRevision, lifecycle: lifecycle[committedRevision], terminal: committedRevision === 5 });
+        // A pre-write interruption retries its one pending transition. An after-write error is
+        // uncertain but durable, so it advances only to the next pending transition.
+        const retryIndex = fault.phase === "before" ? fault.index : fault.index + 1;
+        if (retryIndex < entries.length) { const retry = entries[retryIndex]; if (retry === undefined) throw new Error("Missing retry fixture entry."); await reconstructed.append(retry); }
+        const expectedRevision = retryIndex < entries.length ? retryIndex : committedRevision;
+        const recovered = await reconstructed.read("multi-round");
+        const expectedScores = expectedRevision >= 4 ? 2 : expectedRevision >= 1 ? 1 : 0;
+        const expectedShots = expectedRevision >= 4 ? 2 : expectedRevision >= 1 ? 1 : 0;
+        expect(recovered).toMatchObject({ revision: expectedRevision, lifecycle: lifecycle[expectedRevision], terminal: expectedRevision === 5, state: { currentHoleIndex: expectedRevision >= 3 ? 1 : 0 } });
+        expect(recovered.state.holeScores).toHaveLength(expectedScores);
+        expect(new Set(recovered.state.holeScores.map((score) => score.hole.id)).size).toBe(expectedScores);
+        expect(recovered.state.holeScores.reduce((roundScore, score) => roundScore + score.playedStrokes + score.penaltyStrokes, 0)).toBe(expectedScores);
+        const durable = await Promise.all(Array.from({ length: expectedRevision + 1 }, (_, revision) => reconstructed.entryAt("multi-round", revision)));
         const durableShots = durable.filter((entry) => entry.kind === "shot");
-        expect(durable).toHaveLength(revision + 1);
-        expect(durableShots).toHaveLength(shots);
-        expect(new Set(durableShots.map((entry) => entry.kind === "shot" ? entry.payload.shot.shotId : "")).size).toBe(shots);
-      };
-      const appendAt = async (index: number): Promise<void> => { const entry = entries[index]; if (entry === undefined) throw new Error("Missing multi-Hole fixture entry."); await store.append(entry); };
-      // No playback state is durable: interruption before Cup playback reconstructs aiming;
-      // retrying its one committed Cup transitions to the first Hole summary exactly once.
-      await appendAt(0);
-      await assertAuthoritative(0, "aiming", 0, 0, 0);
-      await appendAt(1);
-      await assertAuthoritative(1, "hole-summary", 0, 1, 1);
-      // Interruption after Cup playback and at the Hole summary retries only advancement,
-      // preserving the completed first Hole Score and its single Cup Shot.
-      await appendAt(2);
-      await assertAuthoritative(2, "aiming", 1, 1, 1);
-      // Interruption during/after Hole advancement retries the second Cup from its new tee;
-      // the first summary cannot be replayed into a duplicate Score.
-      await appendAt(3);
-      await assertAuthoritative(3, "hole-summary", 1, 2, 2);
-      // Before final summary the final Cup is a durable Hole summary; after terminal retry,
-      // only the immutable complete Round summary is recoverable.
-      await appendAt(4);
-      await assertAuthoritative(4, "round-summary", 1, 2, 2, true);
-      await assertAuthoritative(4, "round-summary", 1, 2, 2, true);
-      const terminal = entries[4]; if (terminal === undefined) throw new Error("Missing terminal fixture entry.");
-      await expect(store.append(terminal)).rejects.toThrow("revision");
-      await assertAuthoritative(4, "round-summary", 1, 2, 2, true);
-    } finally { await rm(root, { recursive: true }); }
+        expect(durable).toHaveLength(expectedRevision + 1);
+        expect(durableShots).toHaveLength(expectedShots);
+        expect(new Set(durableShots.map((entry) => entry.kind === "shot" ? entry.payload.shot.shotId : "")).size).toBe(expectedShots);
+      } finally { await rm(root, { recursive: true }); }
+    }
   });
   it("AC-PER-004-04 requires an atomic identifiable successor and rejects predecessor resurrection", () => { const replacement: GolfEntryV1 = { entryVersion: 1, roundId: "round-a", revision: 1, kind: "round-replacement", payload: { successorRoundId: "round-b", successorStartRevision: 0, successorStart: start("round-b").payload as never } }; expect(reconstructRound([start(), replacement])).toMatchObject({ terminal: true, replacement: "round-b" }); expect(() => reconstructRound([start(), { ...replacement, payload: { successorRoundId: "round-b", successorStartRevision: 0 } }, shot(2)])).toThrow(); });
   it("AC-PER-004-04 successor-side open/write/file-sync/directory-sync interruptions retry to one linked active successor", async () => { const { root } = await fixture(); try { for (const boundary of ["open", "write", "file-sync", "directory-sync"] as const) {
