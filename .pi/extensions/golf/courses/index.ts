@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import {
+  createRoundCourseSnapshot,
   parseCourseJson,
   rasterizeCourse,
   type Course,
@@ -16,7 +17,7 @@ export interface LoadedPreviewCourse {
 
 /**
  * Loads the editable built-in JSON as untrusted input, then uses the same public
- * parser and rasterizer available to custom Course callers.
+ * parser, immutable snapshot, and rasterizer available to custom Course callers.
  */
 export async function loadPreviewCourse(
   readPreviewSource: () => Promise<string | Uint8Array> = async () => {
@@ -24,13 +25,15 @@ export async function loadPreviewCourse(
     return readFile(sourceUrl);
   },
 ): Promise<LoadedPreviewCourse> {
-  const validation = parseCourseJson(await readPreviewSource());
+  const source = await readPreviewSource();
+  const validation = parseCourseJson(source);
   if (!validation.ok) {
     throw new Error(`Bundled Preview Course is invalid: ${JSON.stringify(validation.errors)}`);
   }
+  const snapshot = await createRoundCourseSnapshot(async () => source);
   return {
-    course: validation.value,
-    raster: rasterizeCourse(validation.value),
+    course: snapshot.course,
+    raster: rasterizeCourse(snapshot.course),
     warnings: validation.warnings,
   };
 }
