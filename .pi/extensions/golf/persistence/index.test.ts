@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { PersistedRoundState } from "../domain/index.ts";
-import { appendRoundReplacement, GOLF_ENTRY_MIGRATIONS, GOLF_BRANCH_REFERENCE_TYPE, RoundMutationWriter, RoundStore, parseGolfEntry, reconstructActiveBranch, reconstructRound, type BranchEntryLike, type GolfEntryV1, type WriteBoundary } from "./index.ts";
+import { appendRoundReplacement, GOLF_ENTRY_MIGRATIONS, GOLF_BRANCH_REFERENCE_TYPE, RoundMutationWriter, RoundStore, parseGolfEntry, reconstructActiveBranch, reconstructRound, type BranchEntryLike, type GolfEntryV1 } from "./index.ts";
 
 const snapshot = JSON.stringify({ schemaVersion: 1, id: "tiny", name: "Tiny", holes: [{ id: "tiny-hole", number: 1, par: 3, boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] }, tee: { x: 1, y: 1 }, cup: { x: 2, y: 2 }, regions: [{ terrain: "green", shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] } }] }] });
 const state = (status: PersistedRoundState["status"] = "active", lie = { x: 1, y: 1 }): PersistedRoundState => ({ kind: "persisted-round", courseId: "tiny" as PersistedRoundState["courseId"], currentHoleIndex: 0 as PersistedRoundState["currentHoleIndex"], lie, selectedClub: "driver", shotDirectionIndex: 0 as PersistedRoundState["shotDirectionIndex"], holeScores: [], status });
@@ -49,7 +49,7 @@ describe("V2-PER durable Round store", () => {
     expect(reconstructRound([start(), cupShot(), terminal])).toMatchObject({ lifecycle: "round-summary", terminal: true });
     expect(() => reconstructRound([start(), terminal, shot(3)])).toThrow();
   });
-  it("AC-PER-004-02 injects deterministic multi-Hole faults at Cup, summary, advancement, and terminal boundaries", async () => {
+  it("AC-PER-004-02 reconstructs every pre/post-transition interruption without duplicate Cup, Score, or terminal state", async () => {
     const holeOneSummary = multiState(0, { x: 2, y: 2 }, [firstScore]);
     const holeTwoAiming = multiState(1, { x: 6, y: 1 }, [firstScore]);
     const finalHoleSummary = multiState(1, { x: 7, y: 2 }, [firstScore, secondScore]);
@@ -62,47 +62,53 @@ describe("V2-PER durable Round store", () => {
       multiCupShot(4, "multi-cup-two", { x: 6, y: 1 }, { x: 7, y: 2 }, finalHoleSummary),
       { entryVersion: 1, roundId: "multi-round", revision: 5, kind: "round-terminal", payload: { status: "complete", state: finalRoundSummary } },
     ];
-    const cases = [
-      { name: "before Cup playback", index: 1, phase: "before" },
-      { name: "after Cup playback", index: 1, phase: "after" },
-      { name: "Hole summary", index: 2, phase: "before" },
-      { name: "Hole advancement", index: 3, phase: "after" },
-      { name: "final Cup summary", index: 4, phase: "before" },
-      { name: "final summary terminal", index: 5, phase: "after" },
-    ] as const;
     const lifecycle = ["aiming", "hole-summary", "hole-summary", "aiming", "hole-summary", "round-summary"] as const;
-    for (const fault of cases) {
-      const { root, store } = await fixture();
-      try {
-        for (let index = 0; index < fault.index; index += 1) { const entry = entries[index]; if (entry === undefined) throw new Error("Missing multi-Hole fixture entry."); await store.append(entry); }
-        let injected = false;
-        const interrupted = new RoundStore({ root: join(root, ".pi/golf/rounds"), [fault.phase === "before" ? "beforeWrite" : "afterWrite"]: (boundary: WriteBoundary) => {
-          if (!injected && boundary === "write") { injected = true; throw new Error(`interrupt-${fault.name}`); }
-        } });
-        const interruptedEntry = entries[fault.index]; if (interruptedEntry === undefined) throw new Error("Missing interrupted fixture entry.");
-        await expect(interrupted.append(interruptedEntry)).rejects.toThrow(`interrupt-${fault.name}`);
-        const reconstructed = new RoundStore({ root: join(root, ".pi/golf/rounds") });
-        const committedRevision = fault.phase === "after" ? fault.index : fault.index - 1;
-        const committed = await reconstructed.read("multi-round");
-        expect(committed).toMatchObject({ revision: committedRevision, lifecycle: lifecycle[committedRevision], terminal: committedRevision === 5 });
-        // A pre-write interruption retries its one pending transition. An after-write error is
-        // uncertain but durable, so it advances only to the next pending transition.
-        const retryIndex = fault.phase === "before" ? fault.index : fault.index + 1;
-        if (retryIndex < entries.length) { const retry = entries[retryIndex]; if (retry === undefined) throw new Error("Missing retry fixture entry."); await reconstructed.append(retry); }
-        const expectedRevision = retryIndex < entries.length ? retryIndex : committedRevision;
-        const recovered = await reconstructed.read("multi-round");
-        const expectedScores = expectedRevision >= 4 ? 2 : expectedRevision >= 1 ? 1 : 0;
-        const expectedShots = expectedRevision >= 4 ? 2 : expectedRevision >= 1 ? 1 : 0;
-        expect(recovered).toMatchObject({ revision: expectedRevision, lifecycle: lifecycle[expectedRevision], terminal: expectedRevision === 5, state: { currentHoleIndex: expectedRevision >= 3 ? 1 : 0 } });
-        expect(recovered.state.holeScores).toHaveLength(expectedScores);
-        expect(new Set(recovered.state.holeScores.map((score) => score.hole.id)).size).toBe(expectedScores);
-        expect(recovered.state.holeScores.reduce((roundScore, score) => roundScore + score.playedStrokes + score.penaltyStrokes, 0)).toBe(expectedScores);
-        const durable = await Promise.all(Array.from({ length: expectedRevision + 1 }, (_, revision) => reconstructed.entryAt("multi-round", revision)));
-        const durableShots = durable.filter((entry) => entry.kind === "shot");
-        expect(durable).toHaveLength(expectedRevision + 1);
-        expect(durableShots).toHaveLength(expectedShots);
-        expect(new Set(durableShots.map((entry) => entry.kind === "shot" ? entry.payload.shot.shotId : "")).size).toBe(expectedShots);
-      } finally { await rm(root, { recursive: true }); }
+    const transitions = [
+      { name: "Cup playback", index: 1 },
+      { name: "Hole summary", index: 2 },
+      { name: "Hole advancement", index: 3 },
+      { name: "final-summary terminal", index: 5 },
+    ] as const;
+    const assertAuthoritative = async (store: RoundStore, revision: number): Promise<void> => {
+      const recovered = await store.read("multi-round");
+      const scoreIds = revision >= 4 ? ["one", "two"] : revision >= 1 ? ["one"] : [];
+      const shotIds = revision >= 4 ? ["multi-cup-one", "multi-cup-two"] : revision >= 1 ? ["multi-cup-one"] : [];
+      expect(recovered).toMatchObject({ revision, lifecycle: lifecycle[revision], terminal: revision === 5, state: { currentHoleIndex: revision >= 3 ? 1 : 0, status: revision === 5 ? "complete" : "active" } });
+      expect(recovered.state.holeScores.map((score) => score.hole.id)).toEqual(scoreIds);
+      expect(new Set(recovered.state.holeScores.map((score) => score.hole.id)).size).toBe(scoreIds.length);
+      expect(recovered.state.holeScores.reduce((roundScore, score) => roundScore + score.playedStrokes + score.penaltyStrokes, 0)).toBe(scoreIds.length);
+      const durable = await Promise.all(Array.from({ length: revision + 1 }, (_, entryRevision) => store.entryAt("multi-round", entryRevision)));
+      const durableShots = durable.filter((entry) => entry.kind === "shot").map((entry) => entry.kind === "shot" ? entry.payload.shot.shotId : "");
+      expect(durable).toHaveLength(revision + 1);
+      expect(durable.map((entry) => entry.revision)).toEqual(Array.from({ length: revision + 1 }, (_, entryRevision) => entryRevision));
+      expect(durableShots).toEqual(shotIds);
+      expect(new Set(durableShots).size).toBe(shotIds.length);
+    };
+    for (const transition of transitions) {
+      for (const phase of ["before", "after"] as const) {
+        const { root, store } = await fixture();
+        try {
+          for (let index = 0; index < transition.index; index += 1) { const entry = entries[index]; if (entry === undefined) throw new Error("Missing multi-Hole fixture entry."); await store.append(entry); }
+          const pending = entries[transition.index]; if (pending === undefined) throw new Error("Missing transition fixture entry.");
+          const transientRevision = transition.index - 1;
+          const executeTransition = async (): Promise<void> => {
+            if (phase === "before") throw new Error(`interrupt-before-${transition.name}`);
+            await store.append(pending); // This return is the actual durable append acknowledgement.
+            throw new Error(`interrupt-after-${transition.name}`); // Transient consumer state has not advanced.
+          };
+          await expect(executeTransition()).rejects.toThrow(`interrupt-${phase}-${transition.name}`);
+          expect(transientRevision).toBe(transition.index - 1);
+          const reconstructed = new RoundStore({ root: join(root, ".pi/golf/rounds") });
+          const durableRevision = phase === "before" ? transition.index - 1 : transition.index;
+          await assertAuthoritative(reconstructed, durableRevision);
+          if (phase === "before") {
+            await reconstructed.append(pending); // Retry only the still-pending transition.
+          }
+          // A post-acknowledgement interruption reconciles the already durable transition;
+          // it is deliberately not appended again.
+          await assertAuthoritative(reconstructed, transition.index);
+        } finally { await rm(root, { recursive: true }); }
+      }
     }
   });
   it("AC-PER-004-04 requires an atomic identifiable successor and rejects predecessor resurrection", () => { const replacement: GolfEntryV1 = { entryVersion: 1, roundId: "round-a", revision: 1, kind: "round-replacement", payload: { successorRoundId: "round-b", successorStartRevision: 0, successorStart: start("round-b").payload as never } }; expect(reconstructRound([start(), replacement])).toMatchObject({ terminal: true, replacement: "round-b" }); expect(() => reconstructRound([start(), { ...replacement, payload: { successorRoundId: "round-b", successorStartRevision: 0 } }, shot(2)])).toThrow(); });
