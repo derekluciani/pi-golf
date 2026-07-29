@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, stat, unlink } from "node:fs/promises";
 import { basename, dirname, resolve, sep } from "node:path";
 
 import { parseCourseJson } from "../course-loader/raw-parser.ts";
@@ -84,8 +84,12 @@ export function reconstructRound(entries: readonly unknown[]): ReconstructedRoun
     } else if (entry.kind === "checkpoint") {
       const next = entry.payload.state;
       if (!conforms(next)) throw new Error("Incoherent checkpoint transition.");
-      if (lifecycle === "hole-summary" && entry.payload.lifecycle === "aiming") { const hole = course.holes[current.currentHoleIndex + 1]; if (hole === undefined || next.currentHoleIndex !== current.currentHoleIndex + 1 || JSON.stringify(next.holeScores) !== JSON.stringify(current.holeScores) || !samePoint(next.lie, hole.tee)) throw new Error("Incoherent Hole advancement."); }
-      else if (next.currentHoleIndex !== current.currentHoleIndex || JSON.stringify(next.holeScores) !== JSON.stringify(current.holeScores) || !samePoint(next.lie, current.lie)) throw new Error("Incoherent checkpoint transition.");
+      if (lifecycle === "aiming") {
+        if (entry.payload.lifecycle !== "aiming" || next.currentHoleIndex !== current.currentHoleIndex || JSON.stringify(next.holeScores) !== JSON.stringify(current.holeScores) || !samePoint(next.lie, current.lie)) throw new Error("Incoherent aiming checkpoint transition.");
+      } else if (entry.payload.lifecycle === "aiming") {
+        const hole = course.holes[current.currentHoleIndex + 1];
+        if (hole === undefined || next.currentHoleIndex !== current.currentHoleIndex + 1 || JSON.stringify(next.holeScores) !== JSON.stringify(current.holeScores) || !samePoint(next.lie, hole.tee)) throw new Error("Incoherent Hole advancement.");
+      } else if (next.currentHoleIndex !== current.currentHoleIndex || JSON.stringify(next.holeScores) !== JSON.stringify(current.holeScores) || !samePoint(next.lie, current.lie)) throw new Error("Incoherent Hole summary checkpoint transition.");
       current = next; lifecycle = entry.payload.lifecycle;
     } else if (entry.kind === "round-terminal") {
       const next = entry.payload.state;
@@ -117,11 +121,15 @@ export class RoundStore {
     await work;
   }
   async #appendValidated(v: ValidGolfEntry): Promise<void> {
-    const path = this.pathFor(v.roundId); await mkdir(this.#root, { recursive: true }); const existed = await stat(path).then(() => true, () => false);
+    const path = this.pathFor(v.roundId); await mkdir(this.#root, { recursive: true }); let existed = await stat(path).then(() => true, () => false);
+    // Only a retry of revision-zero round-start may remove the known zero-byte artifact
+    // created when its predecessor link was already committed but open was interrupted.
+    // Any non-empty artifact is committed or malformed data and is preserved fail-closed.
+    if (existed && v.kind === "round-start" && v.revision === 0 && (await stat(path)).size === 0) { await unlink(path); existed = false; }
     if (existed) { const existing = await this.#entries(v.roundId); const reconstructed = reconstructRound(existing); if (v.revision !== reconstructed.revision + 1) throw new Error("Round append revision does not match authoritative predecessor."); reconstructRound([...existing, v]); }
     else { if (v.kind !== "round-start" || v.revision !== 0) throw new Error("Round append lacks authoritative round-start predecessor."); reconstructRound([v]); }
-    await this.#boundary("open"); const file = await open(path, "a"); await this.#boundary("open", true);
-    try { await this.#boundary("write"); await file.writeFile(`${JSON.stringify(v)}\n`, "utf8"); await this.#boundary("write", true); await this.#boundary("file-sync"); await file.sync(); await this.#boundary("file-sync", true); } finally { await file.close(); }
+    await this.#boundary("open"); const file = await open(path, "a");
+    try { await this.#boundary("open", true); await this.#boundary("write"); await file.writeFile(`${JSON.stringify(v)}\n`, "utf8"); await this.#boundary("write", true); await this.#boundary("file-sync"); await file.sync(); await this.#boundary("file-sync", true); } finally { await file.close(); }
     if (!existed) { await this.#boundary("directory-sync"); const directory = await open(this.#root, "r"); try { await directory.sync(); await this.#boundary("directory-sync", true); } finally { await directory.close(); } }
   }
   async #entries(roundId: string): Promise<unknown[]> { const path = this.pathFor(roundId); if ((await stat(path)).size > MAX_LOG_BYTES) throw new Error("Round log exceeds bound."); const raw = await readFile(path, "utf8"); const lines = raw.split("\n"); lines.pop(); return lines.map((line) => { try { return JSON.parse(line) as unknown; } catch { throw new Error("Malformed committed Round entry."); } }); }
@@ -163,8 +171,9 @@ export async function appendRoundReplacement(store: RoundStore, args: { readonly
   try { await store.append(link); } catch (error) {
     try { const existing = await store.entryAt(args.predecessorRoundId, args.predecessorRevision + 1); if (existing.kind !== "round-replacement" || JSON.stringify(existing.payload) !== JSON.stringify(link.payload)) throw error; } catch { throw error; }
   }
-  if (await store.hasRound(args.successorRoundId)) { const existing = await store.startEntry(args.successorRoundId); if (JSON.stringify(existing.payload) !== JSON.stringify(successorStart)) throw new Error("Successor Round identity is not unique."); return; }
   try { await appendRoundStart(store, { roundId: args.successorRoundId, snapshot: args.successorSnapshot, state: args.successorState, branchId: args.branchId }); } catch (error) {
+    // A committed successor is idempotent; a known empty post-open artifact is removed
+    // inside the serialized revision-zero append and then materialized on this retry.
     try { const existing = await store.startEntry(args.successorRoundId); if (JSON.stringify(existing.payload) === JSON.stringify(successorStart)) return; } catch { /* preserve original interruption */ }
     throw error;
   }

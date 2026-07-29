@@ -25,4 +25,7 @@ Replacement is link-first: the predecessor appends a `round-replacement` carryin
 the complete successor start, then the successor writes that exact `round-start`.
 A recovery follows a successor only when both durable records match. An interruption
 between them is a fail-closed dangling link (not an active successor); retrying the
-same identities reconciles the link and materializes the one carried successor.
+same identities reconciles the link and materializes the one carried successor. A
+post-open zero-byte successor artifact is known uncommitted state and is removed only
+by that serialized revision-zero retry; non-empty successor data is never removed and
+instead validates as the exact committed start or fails closed.
