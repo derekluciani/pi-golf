@@ -144,11 +144,15 @@ export function isValidPolygon(polygon: PolygonShape): boolean {
     if (squaredDistance(segment.start, segment.end) === 0) return false;
   }
 
-  let twiceArea = 0;
-  for (const segment of segments) {
-    twiceArea += segment.start.x * segment.end.y - segment.end.x * segment.start.y;
-  }
-  if (twiceArea === 0) return false;
+  // A shoelace sum loses a thin polygon's area when large cross-products
+  // cancel.  Exact-sign orientations instead establish that the vertices are
+  // not all collinear without introducing a geometry-wide epsilon.
+  const first = polygon.points[0];
+  const second = polygon.points[1];
+  if (first === undefined || second === undefined) return false;
+  const hasNonCollinearVertex = polygon.points.slice(2)
+    .some((point) => orientation(first, second, point) !== 0);
+  if (!hasNonCollinearVertex) return false;
 
   for (let first = 0; first < segments.length; first += 1) {
     for (let second = first + 1; second < segments.length; second += 1) {

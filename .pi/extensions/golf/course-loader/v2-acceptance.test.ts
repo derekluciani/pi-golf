@@ -190,6 +190,26 @@ describe("V2-T02 Course semantics acceptance", () => {
     expect(polygonContainsPoint(nearLimit, { x: 1_000_000, y: 999_998 })).toBe(true);
     expect(polygonContainsPoint(nearLimit, { x: 999_995.9999999999, y: 999_998 })).toBe(false);
   });
+  it("AC-CRS-003-04 accepts a valid thin polygon at the coordinate limit", () => {
+    const thinNearLimitPolygon = {
+      type: "polygon" as const,
+      points: [
+        { x: 999_999, y: 999_999.9999999 },
+        { x: 1_000_000, y: 999_999.9999999 },
+        { x: 1_000_000, y: 1_000_000 },
+        { x: 999_999, y: 1_000_000 },
+      ],
+    };
+    const h = {
+      ...hole(),
+      regions: [{ terrain: "fairway", shape: thinNearLimitPolygon }, ...hole().regions],
+    };
+    const result = validateCourse(course([h]));
+    expect(result.ok).toBe(true);
+    if (!result.ok) expect(result.errors).not.toContainEqual(expect.objectContaining({
+      path: "$.holes[0].regions[0].shape", code: "invalid-polygon",
+    }));
+  });
   it("AC-CRS-003-04 tests ordinary and near-limit ellipse predicate boundaries", () => {
     const ordinary = { type: "ellipse" as const, center: { x: 0, y: 0 }, radiusX: 2, radiusY: 1 };
     const nearLimit = { ...ordinary, center: { x: 999_998, y: 999_998 } };
