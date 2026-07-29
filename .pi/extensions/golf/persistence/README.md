@@ -20,3 +20,9 @@ branch mirror, not a durability boundary: Pi forks retain the reference prefix a
 reconstruction selects that exact JSONL revision. T11 owns all later command
 lifecycle, but must preserve this append-before-gameplay ordering and append the
 same shaped mirror after its durable mutations.
+
+Replacement is link-first: the predecessor appends a `round-replacement` carrying
+the complete successor start, then the successor writes that exact `round-start`.
+A recovery follows a successor only when both durable records match. An interruption
+between them is a fail-closed dangling link (not an active successor); retrying the
+same identities reconciles the link and materializes the one carried successor.
