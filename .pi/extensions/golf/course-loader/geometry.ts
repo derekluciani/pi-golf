@@ -1,3 +1,5 @@
+import { orient2d } from "robust-predicates";
+
 import type {
   BoundarySegment,
   CorridorShape,
@@ -6,10 +8,6 @@ import type {
   RasterBounds,
   RegionShape,
 } from "./types.ts";
-
-// V2-T02 owns replacing these unchanged V1 comparisons with predicate-specific robustness.
-// Keep the legacy implementation detail private rather than exposing a forbidden V2 contract.
-const LEGACY_V1_GEOMETRY_EPSILON = 1e-6;
 
 export interface GeometryBounds {
   readonly minX: number;
@@ -85,15 +83,16 @@ function squaredDistance(left: Point, right: Point): number {
   return dx * dx + dy * dy;
 }
 
-function pointOnSegment(point: Point, start: Point, end: Point): boolean {
-  const cross = (point.y - start.y) * (end.x - start.x)
-    - (point.x - start.x) * (end.y - start.y);
-  if (Math.abs(cross) > LEGACY_V1_GEOMETRY_EPSILON) return false;
+function orientation(first: Point, second: Point, third: Point): number {
+  return orient2d(first.x, first.y, second.x, second.y, third.x, third.y);
+}
 
-  return point.x >= Math.min(start.x, end.x) - LEGACY_V1_GEOMETRY_EPSILON
-    && point.x <= Math.max(start.x, end.x) + LEGACY_V1_GEOMETRY_EPSILON
-    && point.y >= Math.min(start.y, end.y) - LEGACY_V1_GEOMETRY_EPSILON
-    && point.y <= Math.max(start.y, end.y) + LEGACY_V1_GEOMETRY_EPSILON;
+function pointOnSegment(point: Point, start: Point, end: Point): boolean {
+  if (orientation(start, end, point) !== 0) return false;
+  return point.x >= Math.min(start.x, end.x)
+    && point.x <= Math.max(start.x, end.x)
+    && point.y >= Math.min(start.y, end.y)
+    && point.y <= Math.max(start.y, end.y);
 }
 
 /** Boundary points count as inside for validation and Terrain classification. */
@@ -112,11 +111,6 @@ export function polygonContainsPoint(polygon: PolygonShape, point: Point): boole
   return inside;
 }
 
-function orientation(first: Point, second: Point, third: Point): number {
-  return (second.x - first.x) * (third.y - first.y)
-    - (second.y - first.y) * (third.x - first.x);
-}
-
 function segmentsIntersect(
   firstStart: Point,
   firstEnd: Point,
@@ -128,25 +122,17 @@ function segmentsIntersect(
   const secondFirstStart = orientation(secondStart, secondEnd, firstStart);
   const secondFirstEnd = orientation(secondStart, secondEnd, firstEnd);
 
-  if (((firstSecondStart > LEGACY_V1_GEOMETRY_EPSILON
-      && firstSecondEnd < -LEGACY_V1_GEOMETRY_EPSILON)
-      || (firstSecondStart < -LEGACY_V1_GEOMETRY_EPSILON
-        && firstSecondEnd > LEGACY_V1_GEOMETRY_EPSILON))
-    && ((secondFirstStart > LEGACY_V1_GEOMETRY_EPSILON
-      && secondFirstEnd < -LEGACY_V1_GEOMETRY_EPSILON)
-      || (secondFirstStart < -LEGACY_V1_GEOMETRY_EPSILON
-        && secondFirstEnd > LEGACY_V1_GEOMETRY_EPSILON))) {
+  if (((firstSecondStart > 0 && firstSecondEnd < 0)
+      || (firstSecondStart < 0 && firstSecondEnd > 0))
+    && ((secondFirstStart > 0 && secondFirstEnd < 0)
+      || (secondFirstStart < 0 && secondFirstEnd > 0))) {
     return true;
   }
 
-  return (Math.abs(firstSecondStart) <= LEGACY_V1_GEOMETRY_EPSILON
-      && pointOnSegment(secondStart, firstStart, firstEnd))
-    || (Math.abs(firstSecondEnd) <= LEGACY_V1_GEOMETRY_EPSILON
-      && pointOnSegment(secondEnd, firstStart, firstEnd))
-    || (Math.abs(secondFirstStart) <= LEGACY_V1_GEOMETRY_EPSILON
-      && pointOnSegment(firstStart, secondStart, secondEnd))
-    || (Math.abs(secondFirstEnd) <= LEGACY_V1_GEOMETRY_EPSILON
-      && pointOnSegment(firstEnd, secondStart, secondEnd));
+  return (firstSecondStart === 0 && pointOnSegment(secondStart, firstStart, firstEnd))
+    || (firstSecondEnd === 0 && pointOnSegment(secondEnd, firstStart, firstEnd))
+    || (secondFirstStart === 0 && pointOnSegment(firstStart, secondStart, secondEnd))
+    || (secondFirstEnd === 0 && pointOnSegment(firstEnd, secondStart, secondEnd));
 }
 
 /** A valid polygon has three distinct vertices, non-zero area, and no self-intersection. */
@@ -158,11 +144,15 @@ export function isValidPolygon(polygon: PolygonShape): boolean {
     if (squaredDistance(segment.start, segment.end) === 0) return false;
   }
 
-  let twiceArea = 0;
-  for (const segment of segments) {
-    twiceArea += segment.start.x * segment.end.y - segment.end.x * segment.start.y;
-  }
-  if (twiceArea === 0) return false;
+  // A shoelace sum loses a thin polygon's area when large cross-products
+  // cancel.  Exact-sign orientations instead establish that the vertices are
+  // not all collinear without introducing a geometry-wide epsilon.
+  const first = polygon.points[0];
+  const second = polygon.points[1];
+  if (first === undefined || second === undefined) return false;
+  const hasNonCollinearVertex = polygon.points.slice(2)
+    .some((point) => orientation(first, second, point) !== 0);
+  if (!hasNonCollinearVertex) return false;
 
   for (let first = 0; first < segments.length; first += 1) {
     for (let second = first + 1; second < segments.length; second += 1) {
@@ -214,8 +204,7 @@ export function shapeContainsPoint(shape: RegionShape, point: Point): boolean {
     case "ellipse": {
       const normalizedX = (point.x - shape.center.x) / shape.radiusX;
       const normalizedY = (point.y - shape.center.y) / shape.radiusY;
-      return normalizedX * normalizedX + normalizedY * normalizedY
-        <= 1 + LEGACY_V1_GEOMETRY_EPSILON;
+      return normalizedX * normalizedX + normalizedY * normalizedY <= 1;
     }
     case "corridor": {
       const maximumSquaredDistance = (shape.width / 2) ** 2;
@@ -224,7 +213,7 @@ export function shapeContainsPoint(shape: RegionShape, point: Point): boolean {
         const end = shape.points[index];
         if (start !== undefined && end !== undefined
           && squaredDistanceToSegment(point, start, end)
-            <= maximumSquaredDistance + LEGACY_V1_GEOMETRY_EPSILON) return true;
+            <= maximumSquaredDistance) return true;
       }
       return false;
     }

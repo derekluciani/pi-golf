@@ -66,12 +66,16 @@ export type CourseDiagnosticCode =
   | "invalid-schema-version"
   | "invalid-string"
   | "missing-property"
+  | "duplicate-key"
+  | "input-too-large"
+  | "raster-limit-exceeded"
+  | "diagnostics-truncated"
   | "point-outside-boundary"
   | "point-on-hazard"
   | "unsupported-shape"
   | "unsupported-terrain";
 
-export type CourseWarningCode = "narrow-region";
+export type CourseWarningCode = "narrow-region" | "diagnostics-truncated";
 
 export interface CourseDiagnostic {
   /** JSONPath rooted at `$`, for example `$.holes[0].tee.x`. */
@@ -84,6 +88,10 @@ export interface CourseWarning {
   readonly path: string;
   readonly code: CourseWarningCode;
   readonly message: string;
+  readonly sourcePath?: string;
+  readonly courseIndex?: number;
+  readonly holeIndex?: number;
+  readonly regionIndex?: number;
 }
 
 export type CourseValidationResult =
@@ -126,4 +134,10 @@ export interface RasterizedHole {
 
 export interface RasterizedCourse {
   readonly holes: readonly RasterizedHole[];
+}
+
+/** Immutable Course graph persisted once by the future Round-store boundary. */
+export interface RoundCourseSnapshot {
+  readonly course: Course;
+  readonly serializedCourse: string;
 }

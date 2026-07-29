@@ -13,9 +13,12 @@ import {
 import {
   COURSE_SCHEMA,
   MAX_BOUNDARY_EXTENT,
+  MAX_COURSE_DIAGNOSTICS,
   MAX_GEOMETRY_MAGNITUDE,
+  MAX_TOTAL_RASTER_CELLS,
   SHAPE_TYPES,
 } from "./schema.ts";
+import { canonicalizeCourseWarnings } from "./warnings.ts";
 import {
   OUT_OF_BOUNDS,
   type CorridorShape,
@@ -178,6 +181,7 @@ function diagnosticCode(input: unknown, error: ErrorObject, path: string): Cours
     case "enum":
       return "unsupported-terrain";
     case "minLength":
+    case "maxLength":
     case "pattern":
       return lastProperty === "name" ? "invalid-name" : "invalid-id";
     case "minItems":
@@ -382,22 +386,23 @@ function semanticHole(
   };
 }
 
-function terrainAtGeometry(
+function gameplayTerrain(
   boundary: PolygonShape,
   regions: readonly TerrainRegion[],
   point: Point,
 ): RasterTerrain {
+  // Continuous Boundary is authoritative before owning-cell classification.
   if (!polygonContainsPoint(boundary, point)) return OUT_OF_BOUNDS;
+  const center = { x: Math.floor(point.x) + 0.5, y: Math.floor(point.y) + 0.5 };
+  if (!polygonContainsPoint(boundary, center)) return OUT_OF_BOUNDS;
   let terrain: Terrain = "rough";
-  for (const region of regions) {
-    if (shapeContainsPoint(region.shape, point)) terrain = region.terrain;
-  }
+  for (const region of regions) if (shapeContainsPoint(region.shape, center)) terrain = region.terrain;
   return terrain;
 }
 
-/** Resolves continuous geometry in region order, independently of cell rasterization. */
+/** Authoritative Boundary-first gameplay Terrain lookup. */
 export function terrainAtPoint(hole: CourseHole, point: Point): RasterTerrain {
-  return terrainAtGeometry(hole.boundary, hole.regions, point);
+  return gameplayTerrain(hole.boundary, hole.regions, point);
 }
 
 function regionAffectsCell(boundary: PolygonShape, region: TerrainRegion): boolean {
@@ -438,9 +443,9 @@ function validateHoleGeometry(
       continue;
     }
     if (hole.regions === undefined) continue;
-    const terrain = terrainAtGeometry(boundary, hole.regions, entry.point);
-    if (terrain === "water" || terrain === "bunker") {
-      errors.push({ path: pointPath, code: "point-on-hazard", message: `${entry.name} may not resolve to ${terrain}.` });
+    const terrain = gameplayTerrain(boundary, hole.regions, entry.point);
+    if (entry.name === "tee" && (terrain === OUT_OF_BOUNDS || terrain === "water" || terrain === "bunker")) {
+      errors.push({ path: pointPath, code: "point-on-hazard", message: `tee must own playable non-hazard Terrain.` });
     }
     if (entry.name === "cup" && terrain !== "green") {
       errors.push({ path: pointPath, code: "cup-not-green", message: "Cup must resolve to Green after region layering." });
@@ -454,6 +459,9 @@ function validateHoleGeometry(
         path: `${path}.regions[${index}]`,
         code: "narrow-region",
         message: "Region does not affect any Terrain cell center inside the Course Boundary.",
+        courseIndex: 0,
+        holeIndex: Number(/holes\[(\d+)\]/u.exec(path)?.[1] ?? 0),
+        regionIndex: index,
       });
     }
   });
@@ -488,7 +496,18 @@ function semanticDiagnostics(input: unknown): { errors: CourseDiagnostic[]; warn
     if (hole !== undefined) holes.push({ hole, index });
   }
   reportDuplicates(holes, errors);
-  for (const { hole, index } of holes) validateHoleGeometry(hole, `$.holes[${index}]`, errors, warnings);
+  let totalRasterCells = 0;
+  for (const { hole, index } of holes) {
+    validateHoleGeometry(hole, `$.holes[${index}]`, errors, warnings);
+    if (hole.boundary !== undefined) {
+      const bounds = rasterBounds(hole.boundary);
+      totalRasterCells += bounds.width * bounds.height;
+    }
+  }
+  if (totalRasterCells > MAX_TOTAL_RASTER_CELLS) errors.push({
+    path: "$.holes", code: "raster-limit-exceeded",
+    message: `Total raster cells may not exceed ${MAX_TOTAL_RASTER_CELLS}.`,
+  });
   return { errors, warnings };
 }
 
@@ -501,8 +520,13 @@ function mergeDiagnostics(...groups: readonly (readonly CourseDiagnostic[])[]): 
     }
   }
   const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
-  return [...diagnostics.values()].sort((left, right) =>
+  const sorted = [...diagnostics.values()].sort((left, right) =>
     compare(left.path, right.path) || compare(left.code, right.code));
+  if (sorted.length <= MAX_COURSE_DIAGNOSTICS) return sorted;
+  return [...sorted.slice(0, MAX_COURSE_DIAGNOSTICS - 1), {
+    path: "$", code: "diagnostics-truncated",
+    message: `${sorted.length - MAX_COURSE_DIAGNOSTICS + 1} diagnostics omitted.`,
+  }];
 }
 
 /**
@@ -518,11 +542,12 @@ export function validateCourse(input: unknown): CourseValidationResult {
   );
   const semantic = semanticDiagnostics(input);
   const errors = mergeDiagnostics(structural, semantic.errors);
-
+  const boundedWarnings = canonicalizeCourseWarnings(semantic.warnings);
   if (course === undefined || errors.length > 0) {
-    return { ok: false, errors, warnings: semantic.warnings };
+    const availableWarnings = Math.max(0, MAX_COURSE_DIAGNOSTICS - errors.length);
+    return { ok: false, errors, warnings: boundedWarnings.slice(0, availableWarnings) };
   }
-  return { ok: true, value: course, errors: [], warnings: semantic.warnings };
+  return { ok: true, value: course, errors: [], warnings: boundedWarnings };
 }
 
 /** Alias emphasizing that successful validation also narrows unknown input. */

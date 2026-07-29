@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   calculateHoleLength,
   parseCourse,
+  parseCourseJson,
   rasterizeCourse,
   terrainAtCell,
   terrainAtPoint,
@@ -74,15 +75,22 @@ describe("shipped Course JSON artifacts", () => {
 });
 
 describe("Preview Course content", () => {
-  it("loads JSON through the public parser and rasterizer without a privileged content path", async () => {
-    const input = await readJson(previewUrl);
-    const parsed = parseCourse(input);
+  it("loads JSON through the public raw parser and rasterizer without a privileged content path", async () => {
+    const raw = await readFile(previewUrl);
+    const parsed = parseCourseJson(raw);
     if (!parsed.ok) throw new Error(JSON.stringify(parsed.errors));
 
     const loaded = await loadPreviewCourse();
     expect(loaded.course).toEqual(parsed.value);
     expect(loaded.raster).toEqual(rasterizeCourse(parsed.value));
     expect(loaded.warnings).toEqual([]);
+  });
+
+  it("AC-CRS-002-01 built-in loading rejects duplicate members before decoding", async () => {
+    const raw = await readFile(previewUrl, "utf8");
+    const duplicate = raw.replace(/"schemaVersion"\s*:\s*1/u, '"schemaVersion": 1, "schemaVersion": 1');
+    expect(parseCourseJson(duplicate).ok).toBe(false);
+    await expect(loadPreviewCourse(async () => duplicate)).rejects.toThrow("duplicate-key");
   });
 
   it("has exact identity, Hole order, pars, total par, and calculated Lengths", async () => {
