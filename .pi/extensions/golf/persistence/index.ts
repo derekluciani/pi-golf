@@ -120,8 +120,22 @@ export class RoundStore {
     RoundStore.#appendTails.set(key, work.catch(() => undefined));
     await work;
   }
+  /**
+   * A physical line without its newline was never acknowledged as a JSONL entry.
+   * Remove only that tail, flush the truncation, then append at a record boundary.
+   */
+  async #discardUncommittedTail(roundId: string): Promise<void> {
+    const path = this.pathFor(roundId); const info = await stat(path);
+    if (info.size > MAX_LOG_BYTES) throw new Error("Round log exceeds bound.");
+    const raw = await readFile(path);
+    if (raw.length === 0 || raw.at(-1) === 0x0a) return;
+    const committedLength = raw.lastIndexOf(0x0a) + 1;
+    const file = await open(path, "r+");
+    try { await file.truncate(committedLength); await file.sync(); } finally { await file.close(); }
+  }
   async #appendValidated(v: ValidGolfEntry): Promise<void> {
     const path = this.pathFor(v.roundId); await mkdir(this.#root, { recursive: true }); let existed = await stat(path).then(() => true, () => false);
+    if (existed) await this.#discardUncommittedTail(v.roundId);
     // Only a retry of revision-zero round-start may remove the known zero-byte artifact
     // created when its predecessor link was already committed but open was interrupted.
     // Any non-empty artifact is committed or malformed data and is preserved fail-closed.
