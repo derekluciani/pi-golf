@@ -28,6 +28,10 @@ Geometry, the tee, and the Cup use continuous Course coordinates. Terrain occupi
 
 Every coordinate must be a finite JSON number in the inclusive range `[-1_000_000, 1_000_000]`. Ellipse radii and corridor widths must be greater than zero and at most `1_000_000`. Values are rejected rather than clamped, translated, coerced, or rounded. A Course Boundary bounding box may be no larger than `512 × 512` Course units.
 
+## Resource limits
+
+Course source is limited to 1,048,576 bytes. A Course has at most 18 Holes; each Hole has at most 128 regions; each polygon or corridor has at most 1,024 points; and all Hole rasters together have at most 2,000,000 cells. Course and Hole IDs are at most 64 characters and Course names at most 30 characters. Runtime diagnostics and warnings are capped at 256 entries, including a truncation diagnostic when necessary. These are hard validation limits, not authoring suggestions.
+
 Length is calculated, never authored:
 
 ```text
@@ -54,6 +58,8 @@ Rasterization is deterministic:
 2. Set cell centers inside the Course Boundary to `rough`.
 3. Apply `regions` in array order. A later matching region overrides every earlier region at that point.
 4. Keep Course Boundary rendering separate from Terrain classification.
+
+Containment is closed: points exactly on a Boundary, polygon edge, ellipse edge, corridor cap, or corridor join are inside. A point outside the continuous Course Boundary is Out of Bounds. A point inside owns cell `(floor(x), floor(y))`, including negative coordinates; cells are half-open `[n, n + 1)`. Tee validation, Cup validation, Lies, simulation, and rendering-facing gameplay lookup all use that cell's rasterized Terrain. A continuous shape that misses a cell center does not own that cell's gameplay Terrain.
 
 Order regions deliberately. For example, putting a Green after a Fairway makes the overlap Green; putting a Water strip after that Fairway makes the overlap Water.
 

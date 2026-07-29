@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   calculateHoleLength,
+  OUT_OF_BOUNDS,
   parseCourse,
   parseCourseJson,
   rasterizeCourse,
@@ -13,6 +14,7 @@ import {
   type Course,
   type CourseHole,
 } from "../course-loader/index.ts";
+import { bearingToward, quantizeShotDirection, resolveShot, type CompactRoundState } from "../simulation/index.ts";
 import { loadPreviewCourse } from "./index.ts";
 
 const previewUrl = new URL("./preview-course.json", import.meta.url);
@@ -41,6 +43,27 @@ function requireHole(course: Course, index: number): CourseHole {
   return hole;
 }
 
+function shotAtCup(
+  round: CompactRoundState,
+  hole: CourseHole,
+  shotId: string,
+  club: CompactRoundState["selectedClub"],
+  power: 0.1 | 0.7 | 1 = 1,
+) {
+  const terrain = terrainAtPoint(hole, round.lie);
+  if (terrain === OUT_OF_BOUNDS || terrain === "water") throw new Error("Shot must begin on playable Terrain.");
+  return resolveShot({
+    shotId,
+    round: { ...round, selectedClub: club, directionIndex: quantizeShotDirection(bearingToward(round.lie, hole.cup)) },
+    power,
+    originalLieTerrain: terrain,
+    cup: hole.cup,
+    terrainAt: (point) => terrainAtPoint(hole, point),
+    // The demonstrated shots stay inside this Hole's Boundary; no sweep occurs.
+    courseBoundarySweep: () => null,
+  });
+}
+
 function expectBoundaryExtents(hole: CourseHole, width: number, height: number): void {
   const xs = hole.boundary.points.map((point) => point.x);
   const ys = hole.boundary.points.map((point) => point.y);
@@ -58,7 +81,7 @@ describe("shipped Course JSON artifacts", () => {
     expect(validateStaticSchema(await readJson(previewUrl)), validateStaticSchema.errors?.map((error) => error.instancePath).join(", ")).toBe(true);
   });
 
-  it("loads the minimal one-Hole example through runtime validation", async () => {
+  it("AC-CRS-010-04 validates the unchanged minimal one-Hole example through runtime validation", async () => {
     const course = requireValidCourse(await readJson(minimalUrl));
     expect(course).toMatchObject({
       schemaVersion: 1,
@@ -75,14 +98,16 @@ describe("shipped Course JSON artifacts", () => {
 });
 
 describe("Preview Course content", () => {
-  it("loads JSON through the public raw parser and rasterizer without a privileged content path", async () => {
+  it("AC-CNT-001-03 loads JSON through public parsing, immutable snapshot, and rasterization without a privileged path", async () => {
     const raw = await readFile(previewUrl);
     const parsed = parseCourseJson(raw);
     if (!parsed.ok) throw new Error(JSON.stringify(parsed.errors));
 
     const loaded = await loadPreviewCourse();
     expect(loaded.course).toEqual(parsed.value);
-    expect(loaded.raster).toEqual(rasterizeCourse(parsed.value));
+    expect(Object.isFrozen(loaded.course)).toBe(true);
+    expect(Object.isFrozen(loaded.course.holes)).toBe(true);
+    expect(loaded.raster).toEqual(rasterizeCourse(loaded.course));
     expect(loaded.warnings).toEqual([]);
   });
 
@@ -93,7 +118,7 @@ describe("Preview Course content", () => {
     await expect(loadPreviewCourse(async () => duplicate)).rejects.toThrow("duplicate-key");
   });
 
-  it("has exact identity, Hole order, pars, total par, and calculated Lengths", async () => {
+  it("AC-CNT-001-01 has exact identity, Hole order, pars, total par, and calculated Lengths", async () => {
     const course = requireValidCourse(await readJson(previewUrl));
     expect(course.id).toBe("preview-course");
     expect(course.name).toBe("Preview Course");
@@ -187,7 +212,7 @@ describe("Preview Course content", () => {
     expect(terrainAtPoint(hole, hole.cup)).toBe("green");
   });
 
-  it("resolves every tee to playable Terrain and every Cup to Green in continuous and raster geometry", async () => {
+  it("AC-CNT-001-02 resolves every tee to playable Terrain and every Cup to Green in gameplay raster geometry", async () => {
     const course = requireValidCourse(await readJson(previewUrl));
     const raster = rasterizeCourse(course);
 
@@ -203,6 +228,41 @@ describe("Preview Course content", () => {
       );
       expect(terrainAtCell(holeRaster, Math.floor(hole.cup.x), Math.floor(hole.cup.y))).toBe("green");
     });
+  });
+
+  it("AC-CNT-001-04 proves Hole 4's Driver stop, legal Water Carry, and completion through public Course and simulation APIs", async () => {
+    const hole = requireHole((await loadPreviewCourse()).course, 2);
+    let round: CompactRoundState = {
+      lie: hole.tee, playedStrokes: 0, penaltyStrokes: 0, selectedClub: "driver", directionIndex: 0 as never,
+    };
+
+    const firstDriver = shotAtCup(round, hole, "hole-4-first-driver", "driver");
+    expect(firstDriver.terminal).toBe("rest");
+    expect(firstDriver.finalPosition.x).toBeLessThan(75);
+    expect(terrainAtPoint(hole, firstDriver.finalPosition)).not.toBe("water");
+    round = firstDriver.resultingRound;
+
+    const positioningWedge = shotAtCup(round, hole, "hole-4-positioning-wedge", "pw");
+    expect(positioningWedge.terminal).toBe("rest");
+    round = positioningWedge.resultingRound;
+
+    const clearingDriver = shotAtCup(round, hole, "hole-4-clearing-driver", "driver");
+    expect(clearingDriver.landingPosition.x).toBeGreaterThan(100);
+    expect(clearingDriver.terminal).toBe("rest");
+    round = clearingDriver.resultingRound;
+
+    for (const [shotId, club, power] of [
+      ["hole-4-approach-1", "pw", 1],
+      ["hole-4-approach-2", "pw", 1],
+      ["hole-4-approach-3", "pw", 0.7],
+    ] as const) {
+      round = shotAtCup(round, hole, shotId, club, power).resultingRound;
+    }
+    let completion = shotAtCup(round, hole, "hole-4-putt-1", "putter", 0.1);
+    for (let putt = 2; completion.terminal !== "cup" && putt <= 6; putt += 1) {
+      completion = shotAtCup(completion.resultingRound, hole, `hole-4-putt-${putt}`, "putter", 0.1);
+    }
+    expect(completion.terminal).toBe("cup");
   });
 
   it("validates the mandatory airborne Water crossing and rasterizes deterministically", async () => {
