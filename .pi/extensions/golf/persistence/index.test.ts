@@ -12,6 +12,12 @@ const start = (roundId = "round-a", branchId = "session-a"): GolfEntryV1 => ({ e
 const shot = (revision = 1, shotId = "shot-a"): GolfEntryV1 => ({ entryVersion: 1, roundId: "round-a", revision, kind: "shot", payload: { state: state("active", { x: 2, y: 1 }), shot: { shotId, preShotLie: { x: 1, y: 1 }, inputs: { club: "driver", directionIndex: 0, power: 1 }, landingPosition: { x: 2, y: 1 }, finalPosition: { x: 2, y: 1 }, terminal: "rest", resultingSpeed: 0, elapsed: 1, resultingRound: { lie: { x: 2, y: 1 }, playedStrokes: 1, penaltyStrokes: 0, selectedClub: "driver", directionIndex: 0 } } } });
 const completedState = (status: PersistedRoundState["status"] = "active"): PersistedRoundState => ({ ...state(status, { x: 2, y: 2 }), holeScores: [{ hole: { id: "tiny-hole" as never, number: 1 as never, courseIndex: 0 as never }, playedStrokes: 1, penaltyStrokes: 0, completed: true }] });
 const cupShot = (revision = 1): GolfEntryV1 => ({ entryVersion: 1, roundId: "round-a", revision, kind: "shot", payload: { state: completedState(), shot: { shotId: "cup-shot", preShotLie: { x: 1, y: 1 }, inputs: { club: "driver", directionIndex: 0, power: 1 }, landingPosition: { x: 2, y: 2 }, finalPosition: { x: 2, y: 2 }, terminal: "cup", resultingSpeed: 0, elapsed: 1, resultingRound: { lie: { x: 2, y: 2 }, playedStrokes: 1, penaltyStrokes: 0, selectedClub: "driver", directionIndex: 0 } } } });
+const multiHoleSnapshot = JSON.stringify({ schemaVersion: 1, id: "two-hole", name: "Two Hole", holes: [{ id: "one", number: 1, par: 3, boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] }, tee: { x: 1, y: 1 }, cup: { x: 2, y: 2 }, regions: [{ terrain: "green", shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] } }] }, { id: "two", number: 2, par: 3, boundary: { type: "polygon", points: [{ x: 5, y: 0 }, { x: 9, y: 0 }, { x: 9, y: 4 }, { x: 5, y: 4 }] }, tee: { x: 6, y: 1 }, cup: { x: 7, y: 2 }, regions: [{ terrain: "green", shape: { type: "polygon", points: [{ x: 5, y: 0 }, { x: 9, y: 0 }, { x: 9, y: 4 }, { x: 5, y: 4 }] } }] }] });
+const multiState = (currentHoleIndex: number, lie: { x: number; y: number }, holeScores: PersistedRoundState["holeScores"], status: PersistedRoundState["status"] = "active"): PersistedRoundState => ({ kind: "persisted-round", courseId: "two-hole" as PersistedRoundState["courseId"], currentHoleIndex: currentHoleIndex as PersistedRoundState["currentHoleIndex"], lie, selectedClub: "driver", shotDirectionIndex: 0 as PersistedRoundState["shotDirectionIndex"], holeScores, status });
+const firstScore = { hole: { id: "one" as never, number: 1 as never, courseIndex: 0 as never }, playedStrokes: 1, penaltyStrokes: 0, completed: true };
+const secondScore = { hole: { id: "two" as never, number: 2 as never, courseIndex: 1 as never }, playedStrokes: 1, penaltyStrokes: 0, completed: true };
+const multiStart = (): GolfEntryV1 => ({ entryVersion: 1, roundId: "multi-round", revision: 0, kind: "round-start", payload: { courseSnapshot: multiHoleSnapshot, state: multiState(0, { x: 1, y: 1 }, []), branchId: "multi-session" } });
+const multiCupShot = (revision: number, shotId: string, preShotLie: { x: number; y: number }, cup: { x: number; y: number }, stateAfterCup: PersistedRoundState): GolfEntryV1 => ({ entryVersion: 1, roundId: "multi-round", revision, kind: "shot", payload: { state: stateAfterCup, shot: { shotId, preShotLie, inputs: { club: "driver", directionIndex: 0, power: 1 }, landingPosition: cup, finalPosition: cup, terminal: "cup", resultingSpeed: 0, elapsed: 1, resultingRound: { lie: cup, playedStrokes: 1, penaltyStrokes: 0, selectedClub: "driver", directionIndex: 0 } } } });
 const branch = (refs: readonly { roundId: string; revision: number }[]): BranchEntryLike[] => [{ type: "session", id: "root", parentId: null, timestamp: "2026-01-01T00:00:00Z" }, ...refs.map((ref, i) => ({ type: "custom", id: `golf-${i}`, parentId: i === 0 ? "root" : `golf-${i - 1}`, timestamp: "2026-01-01T00:00:00Z", customType: GOLF_BRANCH_REFERENCE_TYPE, data: ref }))];
 async function fixture(): Promise<{ root: string; store: RoundStore }> { const root = await mkdtemp(join(tmpdir(), "pi-golf-round-")); return { root, store: new RoundStore({ root: join(root, ".pi/golf/rounds") }) }; }
 
@@ -42,6 +48,57 @@ describe("V2-PER durable Round store", () => {
     expect(reconstructRound([start(), aiming])).toMatchObject({ lifecycle: "aiming", state: expect.objectContaining({ selectedClub: "putter" }) });
     expect(reconstructRound([start(), cupShot(), terminal])).toMatchObject({ lifecycle: "round-summary", terminal: true });
     expect(() => reconstructRound([start(), terminal, shot(3)])).toThrow();
+  });
+  it("AC-PER-004-02 deterministically reconstructs multi-Hole interruption/retry boundaries with each Score and Shot exactly once", async () => {
+    const { root, store } = await fixture();
+    try {
+      const holeOneSummary = multiState(0, { x: 2, y: 2 }, [firstScore]);
+      const holeTwoAiming = multiState(1, { x: 6, y: 1 }, [firstScore]);
+      const finalHoleSummary = multiState(1, { x: 7, y: 2 }, [firstScore, secondScore]);
+      const finalRoundSummary = multiState(1, { x: 7, y: 2 }, [firstScore, secondScore], "complete");
+      const entries: readonly GolfEntryV1[] = [
+        multiStart(),
+        multiCupShot(1, "multi-cup-one", { x: 1, y: 1 }, { x: 2, y: 2 }, holeOneSummary),
+        { entryVersion: 1, roundId: "multi-round", revision: 2, kind: "checkpoint", payload: { state: holeTwoAiming, lifecycle: "aiming" } },
+        multiCupShot(3, "multi-cup-two", { x: 6, y: 1 }, { x: 7, y: 2 }, finalHoleSummary),
+        { entryVersion: 1, roundId: "multi-round", revision: 4, kind: "round-terminal", payload: { status: "complete", state: finalRoundSummary } },
+      ];
+      const assertAuthoritative = async (revision: number, lifecycle: "aiming" | "hole-summary" | "round-summary", holeIndex: number, score: number, shots: number, terminal = false): Promise<void> => {
+        const recovered = await store.read("multi-round");
+        expect(recovered).toMatchObject({ revision, lifecycle, terminal, state: { currentHoleIndex: holeIndex } });
+        expect(recovered.state.holeScores).toHaveLength(score);
+        expect(new Set(recovered.state.holeScores.map((hole) => hole.hole.id)).size).toBe(score);
+        expect(recovered.state.holeScores.reduce((total, hole) => total + hole.playedStrokes + hole.penaltyStrokes, 0)).toBe(score);
+        const durable = await Promise.all(Array.from({ length: revision + 1 }, (_, index) => store.entryAt("multi-round", index)));
+        const durableShots = durable.filter((entry) => entry.kind === "shot");
+        expect(durable).toHaveLength(revision + 1);
+        expect(durableShots).toHaveLength(shots);
+        expect(new Set(durableShots.map((entry) => entry.kind === "shot" ? entry.payload.shot.shotId : "")).size).toBe(shots);
+      };
+      const appendAt = async (index: number): Promise<void> => { const entry = entries[index]; if (entry === undefined) throw new Error("Missing multi-Hole fixture entry."); await store.append(entry); };
+      // No playback state is durable: interruption before Cup playback reconstructs aiming;
+      // retrying its one committed Cup transitions to the first Hole summary exactly once.
+      await appendAt(0);
+      await assertAuthoritative(0, "aiming", 0, 0, 0);
+      await appendAt(1);
+      await assertAuthoritative(1, "hole-summary", 0, 1, 1);
+      // Interruption after Cup playback and at the Hole summary retries only advancement,
+      // preserving the completed first Hole Score and its single Cup Shot.
+      await appendAt(2);
+      await assertAuthoritative(2, "aiming", 1, 1, 1);
+      // Interruption during/after Hole advancement retries the second Cup from its new tee;
+      // the first summary cannot be replayed into a duplicate Score.
+      await appendAt(3);
+      await assertAuthoritative(3, "hole-summary", 1, 2, 2);
+      // Before final summary the final Cup is a durable Hole summary; after terminal retry,
+      // only the immutable complete Round summary is recoverable.
+      await appendAt(4);
+      await assertAuthoritative(4, "round-summary", 1, 2, 2, true);
+      await assertAuthoritative(4, "round-summary", 1, 2, 2, true);
+      const terminal = entries[4]; if (terminal === undefined) throw new Error("Missing terminal fixture entry.");
+      await expect(store.append(terminal)).rejects.toThrow("revision");
+      await assertAuthoritative(4, "round-summary", 1, 2, 2, true);
+    } finally { await rm(root, { recursive: true }); }
   });
   it("AC-PER-004-04 requires an atomic identifiable successor and rejects predecessor resurrection", () => { const replacement: GolfEntryV1 = { entryVersion: 1, roundId: "round-a", revision: 1, kind: "round-replacement", payload: { successorRoundId: "round-b", successorStartRevision: 0, successorStart: start("round-b").payload as never } }; expect(reconstructRound([start(), replacement])).toMatchObject({ terminal: true, replacement: "round-b" }); expect(() => reconstructRound([start(), { ...replacement, payload: { successorRoundId: "round-b", successorStartRevision: 0 } }, shot(2)])).toThrow(); });
   it("AC-PER-004-04 successor-side open/write/file-sync/directory-sync interruptions retry to one linked active successor", async () => { const { root } = await fixture(); try { for (const boundary of ["open", "write", "file-sync", "directory-sync"] as const) {
