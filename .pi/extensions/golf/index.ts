@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { createRoundCourseSnapshot } from "./course-loader/snapshot.ts";
-import { captureSelectedCourseSnapshot, formatCourseLoadIssue, PREVIEW_COURSE_SOURCE, readStableCourseFile, selectCourseFromPath, showCourseSettings } from "./course-loader/index.ts";
+import { captureSelectedCourseSnapshot, formatCourseLoadIssue, playSelectedMinimalCourseAndReturnToPreview, PREVIEW_COURSE_SOURCE, readStableCourseFile, selectCourseFromPath, showCourseSettings } from "./course-loader/index.ts";
 import { FOUNDATION_CONTRACT_VERSION, parseCourseHoleIndex, parseCourseId, parseShotDirectionIndex } from "./domain/index.ts";
 import { bearingToward, quantizeShotDirection } from "./simulation/inputs.ts";
 import { appendRoundStart, reconstructActiveBranch, RoundStore } from "./persistence/index.ts";
@@ -22,6 +22,15 @@ export default function registerGolfExtension(pi: ExtensionAPI): void {
       if (trimmed === "course") {
         if (ctx.mode !== "tui") { ctx.ui.notify("/golf course requires interactive TUI mode.", "warning"); return; }
         try { await showCourseSettings(ctx); } catch (error: unknown) { ctx.ui.notify(`Could not open Golf Settings: ${error instanceof Error ? error.message : "Unknown Course settings failure."}`, "error"); }
+        return;
+      }
+      if (trimmed === "proof-minimal-course") {
+        try {
+          const result = await playSelectedMinimalCourseAndReturnToPreview(ctx.cwd);
+          ctx.ui.notify(`${result.courseName} proof play completed (${result.rasterCellCount} raster cells); returned to Preview Course.`, "info");
+        } catch (error: unknown) {
+          ctx.ui.notify(`Minimal Course proof did not run; selection was left unchanged: ${error instanceof Error ? error.message : "Unknown Course proof failure."}`, "error");
+        }
         return;
       }
       const explicit = /^course\s+([\s\S]+)$/u.exec(trimmed);

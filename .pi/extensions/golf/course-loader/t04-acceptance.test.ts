@@ -7,7 +7,7 @@ import { createRoundCourseSnapshot } from "./snapshot.ts";
 import {
   buildCourseSettingsModel, captureSelectedCourseSnapshot, discoverCourses,
   loadCourseFile, MAX_COURSE_JSON_BYTES, MAX_DISCOVERED_CANDIDATES,
-  PREVIEW_COURSE_CATALOG, PREVIEW_COURSE_SETTINGS, readCourseSettings,
+  playSelectedMinimalCourseAndReturnToPreview, PREVIEW_COURSE_CATALOG, PREVIEW_COURSE_SETTINGS, readCourseSettings,
   reconcileCourseCatalog, selectCourseFromPath, selectLoadedCourse,
   writeCourseSettings,
 } from "./index.ts";
@@ -102,7 +102,24 @@ describe("V2-T04 discovery and settings acceptance", () => {
     for (const term of ["Coordinates", "Length", "Polygon", "Ellipse", "Corridor", "Containment is closed", "array order", "owns cell", "Resource limits", "duplicate object members", "validation"]) expect(documentation).toContain(term);
   });
 
-  it("AC-CRS-010-04 AC-CMD-003-01 AC-CMD-003-02 AC-CMD-003-03 validates the unchanged minimal artifact and explicit selection failure rollback", async () => {
-    const cwd = await root(); const minimal = new URL("../../../../docs/examples/minimal-course.json", import.meta.url); const bytes = await readFile(minimal); const artifact = join(cwd, "minimal.json"); await writeFile(artifact, bytes); expect((await selectCourseFromPath(cwd, artifact)).ok).toBe(true); const before = await readCourseSettings(cwd); await writeFile(artifact, "{"); expect((await selectCourseFromPath(cwd, artifact)).ok).toBe(false); expect((await readCourseSettings(cwd)).settings).toEqual(before.settings); await selectLoadedCourse(cwd, "preview"); expect((await readCourseSettings(cwd)).settings).toEqual(PREVIEW_COURSE_SETTINGS);
+  it("AC-CRS-010-04 selects, parses, snapshots, rasterizes, simulates, and returns the unchanged minimal example to Preview", async () => {
+    const cwd = await root(); const minimal = new URL("../../../../docs/examples/minimal-course.json", import.meta.url);
+    expect((await selectCourseFromPath(cwd, minimal.pathname)).ok).toBe(true);
+    const result = await playSelectedMinimalCourseAndReturnToPreview(cwd);
+    expect(result).toMatchObject({ courseName: "Minimal Course", rasterCellCount: 200, shot: { terminal: "rest", resultingRound: { playedStrokes: 1, penaltyStrokes: 0 } } });
+    expect((await readCourseSettings(cwd)).settings).toEqual(PREVIEW_COURSE_SETTINGS);
+  });
+
+  it("AC-CMD-003-03 plays the explicitly selected unchanged minimal example and safely returns to Preview", async () => {
+    const cwd = await root(); const minimal = new URL("../../../../docs/examples/minimal-course.json", import.meta.url);
+    expect((await selectCourseFromPath(cwd, minimal.pathname)).ok).toBe(true);
+    await expect(playSelectedMinimalCourseAndReturnToPreview(cwd)).resolves.toMatchObject({ courseName: "Minimal Course" });
+    expect((await readCourseSettings(cwd)).settings).toEqual(PREVIEW_COURSE_SETTINGS);
+    await expect(playSelectedMinimalCourseAndReturnToPreview(cwd)).rejects.toThrow("Select docs/examples/minimal-course.json");
+    expect((await readCourseSettings(cwd)).settings).toEqual(PREVIEW_COURSE_SETTINGS);
+  });
+
+  it("AC-CMD-003-01 AC-CMD-003-02 preserves explicit selection on malformed replacement", async () => {
+    const cwd = await root(); const minimal = new URL("../../../../docs/examples/minimal-course.json", import.meta.url); const artifact = join(cwd, "minimal.json"); await writeFile(artifact, await readFile(minimal)); expect((await selectCourseFromPath(cwd, artifact)).ok).toBe(true); const before = await readCourseSettings(cwd); await writeFile(artifact, "{"); expect((await selectCourseFromPath(cwd, artifact)).ok).toBe(false); expect((await readCourseSettings(cwd)).settings).toEqual(before.settings);
   });
 });

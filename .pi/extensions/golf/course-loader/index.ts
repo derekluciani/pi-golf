@@ -28,6 +28,7 @@ export { captureSelectedCourseSnapshot, selectCourseFromPath, selectLoadedCourse
 export { buildCourseSettingsModel, COURSE_SETTING_ID, COURSE_SETTING_LABEL, createCourseSettingsComponent, GOLF_SETTINGS_TITLE, showCourseSettings, type CourseSettingOption, type CourseSettingsComponent, type CourseSettingsComponentOptions, type CourseSettingsModel } from "./ui.ts";
 export { canonicalizeCourseWarnings } from "./warnings.ts";
 export { createRoundCourseSnapshot } from "./snapshot.ts";
+export { playSelectedMinimalCourseAndReturnToPreview, type MinimalCoursePlayResult } from "./minimal-course-play.ts";
 export { parseCourse, terrainAtPoint, validateCourse, validateCourseStructure } from "./validation.ts";
 export {
   OUT_OF_BOUNDS,

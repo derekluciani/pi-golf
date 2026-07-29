@@ -21,6 +21,7 @@
     "README.md",
     ".pi/extensions/golf/course-loader/catalog.ts",
     ".pi/extensions/golf/course-loader/loading.ts",
+    ".pi/extensions/golf/course-loader/minimal-course-play.ts",
     ".pi/extensions/golf/course-loader/selection.ts",
     ".pi/extensions/golf/course-loader/settings.ts",
     ".pi/extensions/golf/course-loader/ui.ts",
