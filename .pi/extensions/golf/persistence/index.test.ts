@@ -49,6 +49,26 @@ describe("V2-PER durable Round store", () => {
     expect(reconstructRound([start(), cupShot(), terminal])).toMatchObject({ lifecycle: "round-summary", terminal: true });
     expect(() => reconstructRound([start(), terminal, shot(3)])).toThrow();
   });
+  it("AC-PER-004-03 persists abandonment as one terminal Round summary and rejects later active mutations", async () => {
+    const { root, store } = await fixture();
+    try {
+      const abandoned: GolfEntryV1 = { entryVersion: 1, roundId: "round-a", revision: 1, kind: "round-terminal", payload: { status: "abandoned", state: state("abandoned") } };
+      await store.append(start());
+      await store.append(abandoned);
+      await expect(store.read("round-a")).resolves.toMatchObject({ revision: 1, lifecycle: "round-summary", terminal: true, state: { status: "abandoned" } });
+      const entries = (await readFile(store.pathFor("round-a"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as GolfEntryV1);
+      expect(entries.filter((entry) => entry.kind === "round-terminal")).toHaveLength(1);
+      const laterActiveEntries: readonly GolfEntryV1[] = [
+        shot(2),
+        { entryVersion: 1, roundId: "round-a", revision: 2, kind: "checkpoint", payload: { state: state(), lifecycle: "aiming" } },
+      ];
+      for (const entry of laterActiveEntries) {
+        await expect(store.append(entry)).rejects.toThrow("Invalid entry after terminal");
+        expect(() => reconstructRound([start(), abandoned, entry])).toThrow("Invalid entry after terminal");
+      }
+      expect((await store.read("round-a")).revision).toBe(1);
+    } finally { await rm(root, { recursive: true }); }
+  });
   it("AC-PER-004-02 reconstructs every pre/post-transition interruption without duplicate Cup, Score, or terminal state", async () => {
     const holeOneSummary = multiState(0, { x: 2, y: 2 }, [firstScore]);
     const holeTwoAiming = multiState(1, { x: 6, y: 1 }, [firstScore]);
