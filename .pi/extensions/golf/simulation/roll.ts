@@ -19,10 +19,18 @@ export interface RollKeyframe {
 }
 
 /**
- * `terrainAt` is the T02 Boundary-first gameplay lookup. `boundaryDistance`, when
- * provided, supplies the exact continuous boundary crossing instead of relying on
- * a raster-cell transition. It is deliberately a pure dependency of Roll.
+ * Exact continuous Course-Boundary sweep supplied by the T02 gameplay boundary.
+ * It returns the first exit distance in `[0, maximumDistance]`, or `null` when
+ * the bounded ray stays within the closed Boundary. Roll never infers Boundary
+ * crossings from raster cells.
  */
+export type CourseBoundarySweep = (
+  from: Point,
+  direction: Point,
+  maximumDistance: number,
+) => number | null;
+
+/** `terrainAt` is the T02 Boundary-first gameplay Terrain lookup. */
 export interface RollInput {
   readonly position: Point;
   readonly speed: number;
@@ -31,7 +39,8 @@ export interface RollInput {
   readonly originalLieTerrain: PlayableTerrain;
   readonly cup: Point;
   readonly terrainAt: (point: Point) => RasterTerrain;
-  readonly boundaryDistance?: (from: Point, direction: Point, maximumDistance: number) => number | null;
+  /** Required exact continuous Course-Boundary dependency, bounded per segment. */
+  readonly courseBoundarySweep: CourseBoundarySweep;
 }
 
 export interface RollTrajectory {
@@ -198,8 +207,11 @@ export function resolveRoll(input: RollInput): RollTrajectory {
           });
         }
       }
-      const boundaryDistance = input.boundaryDistance?.(position, direction, maximumDistance) ?? null;
-      if (boundaryDistance !== null && boundaryDistance >= 0 && boundaryDistance <= maximumDistance) {
+      const boundaryDistance = input.courseBoundarySweep(position, direction, maximumDistance);
+      if (boundaryDistance !== null) {
+        if (!Number.isFinite(boundaryDistance) || boundaryDistance < 0 || boundaryDistance > maximumDistance) {
+          throw new RangeError("Course Boundary sweep must return null or a finite distance within its bound.");
+        }
         candidates.push({ distance: boundaryDistance, time: timeForDistance(speed, deceleration, boundaryDistance), kind: "out-of-bounds" });
       }
       if (!insideCup) {

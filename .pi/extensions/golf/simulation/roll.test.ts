@@ -6,7 +6,8 @@ import { PENALTY_NOTICES, advancePenaltyNotice, createPenaltyNotice, discardPena
 
 const east = { x: 1, y: 0 };
 const green = () => "green" as const;
-const base = { position: { x: 0, y: 0 }, speed: 2, direction: east, club: "putter" as const, originalLieTerrain: "fairway" as const, cup: { x: -10, y: 0 }, terrainAt: green };
+const staysWithinCourseBoundary = () => null;
+const base = { position: { x: 0, y: 0 }, speed: 2, direction: east, club: "putter" as const, originalLieTerrain: "fairway" as const, cup: { x: -10, y: 0 }, terrainAt: green, courseBoundarySweep: staysWithinCourseBoundary };
 const near = (actual: number, expected: number) => expect(actual).toBeCloseTo(expected, 10);
 
 describe("V2-SIM-005 Terrain Roll and Green modifiers", () => {
@@ -51,7 +52,41 @@ describe("V2-SIM-006 analytical Roll and splitting", () => {
     expect(resolveRoll({ ...base, speed: 20, terrainAt: (p) => p.x >= 1 ? "water" : "green" }).terminal).toBe("water");
     const transition = resolveRoll({ ...base, speed: 4, terrainAt: (p) => p.x >= 1 ? "rough" : "green" });
     expect(transition.finalPosition.x).toBeLessThan(8); // not Green's 8-unit rest
-    expect(resolveRoll({ ...base, speed: 20, boundaryDistance: () => 0.001 }).terminal).toBe("out-of-bounds");
+    expect(resolveRoll({ ...base, speed: 20, courseBoundarySweep: () => 0.001 }).terminal).toBe("out-of-bounds");
+  });
+  it("AC-SIM-006-01/03 uses the required continuous Course-Boundary sweep within an unchanged raster cell", () => {
+    let receivedBound: number | undefined;
+    const result = resolveRoll({
+      ...base,
+      position: { x: 0.1, y: 0 },
+      speed: 2,
+      terrainAt: green,
+      // The raster cell remains Green through x=1; the continuous Boundary exits at x=0.35.
+      courseBoundarySweep: (from, _direction, maximumDistance) => {
+        receivedBound = maximumDistance;
+        const exitDistance = 0.35 - from.x;
+        return exitDistance <= maximumDistance ? exitDistance : null;
+      },
+    });
+    expect(receivedBound).toBeGreaterThan(0);
+    expect(result.terminal).toBe("out-of-bounds");
+    near(result.finalPosition.x, 0.35);
+    near(result.elapsed, 2 - Math.sqrt(3.5));
+
+    const shot = resolveShot({
+      shotId: "continuous-boundary",
+      round: { lie: { x: 0.1, y: 0 }, playedStrokes: 0, penaltyStrokes: 0, selectedClub: "putter", directionIndex: 0 as never },
+      power: 0.2,
+      originalLieTerrain: "green",
+      cup: { x: -10, y: 0 },
+      terrainAt: green,
+      courseBoundarySweep: (from, _direction, maximumDistance) => {
+        const exitDistance = 0.35 - from.x;
+        return exitDistance <= maximumDistance ? exitDistance : null;
+      },
+    });
+    expect(shot.terminal).toBe("out-of-bounds");
+    expect(shot.finalPosition).toEqual({ x: 0.1, y: 0 });
   });
   it("AC-SIM-006-01/03 handles exact negative cell edges and every swept crossing", () => {
     const negativeEdge = resolveRoll({ ...base, position: { x: 3, y: 0 }, direction: { x: -1, y: 0 }, speed: 4, terrainAt: (p) => p.x < 3 ? "water" : "green" });
@@ -64,12 +99,12 @@ describe("V2-SIM-006 analytical Roll and splitting", () => {
     expect(multiBoundary.elapsed).toBeLessThan(1 / 120);
   });
   it("AC-SIM-006-04 resolves pairwise and multi-event ties within an absolute 1e-9 seconds by precedence", () => {
-    const tied = resolveRoll({ ...base, position: { x: 0.999, y: 0 }, speed: 2, cup: { x: 1.35, y: 0 }, terrainAt: (p) => p.x >= 1 ? "water" : "green", boundaryDistance: () => 0.001 + 5e-10 });
+    const tied = resolveRoll({ ...base, position: { x: 0.999, y: 0 }, speed: 2, cup: { x: 1.35, y: 0 }, terrainAt: (p) => p.x >= 1 ? "water" : "green", courseBoundarySweep: () => 0.001 + 5e-10 });
     expect(tied.terminal).toBe("out-of-bounds");
     expect(resolveRoll({ ...base, position: { x: 0.999, y: 0 }, speed: 2, cup: { x: 1.35, y: 0 }, terrainAt: (p) => p.x >= 1 ? "water" : "green" }).terminal).toBe("water");
 
     // At speed 100 the events are 2e-9 seconds apart: Water is earlier, not an OOB tie.
-    const beyondAbsoluteTolerance = resolveRoll({ ...base, position: { x: 0.999, y: 0 }, speed: 100, cup: { x: -2, y: 0 }, terrainAt: (p) => p.x >= 1 ? "water" : "green", boundaryDistance: () => 0.0010002 });
+    const beyondAbsoluteTolerance = resolveRoll({ ...base, position: { x: 0.999, y: 0 }, speed: 100, cup: { x: -2, y: 0 }, terrainAt: (p) => p.x >= 1 ? "water" : "green", courseBoundarySweep: () => 0.0010002 });
     expect(beyondAbsoluteTolerance.terminal).toBe("water");
   });
   it("AC-SIM-006-05 produces deep-equal canonical Roll independent of presentation rate", () => {
@@ -82,7 +117,7 @@ describe("V2-SIM-007 Cup capture", () => {
     expect(resolveRoll({ ...base, speed: 1.4, cup: { x: 1, y: 0 } }).terminal).toBe("cup");
     expect(resolveRoll({ ...base, speed: 1.85, cup: { x: 1.35, y: 0 } }).terminal).toBe("cup"); // speed at entry is 1.5
     expect(resolveRoll({ ...base, speed: 2, cup: { x: 1, y: 0 } }).terminal).not.toBe("cup");
-    const landed = resolveShot({ shotId: "landing", round: { lie: { x: 0, y: 0 }, playedStrokes: 0, penaltyStrokes: 0, selectedClub: "pw", directionIndex: 0 as never }, power: 0.1, originalLieTerrain: "fairway", cup: { x: 1.5, y: 0 }, terrainAt: green });
+    const landed = resolveShot({ shotId: "landing", round: { lie: { x: 0, y: 0 }, playedStrokes: 0, penaltyStrokes: 0, selectedClub: "pw", directionIndex: 0 as never }, power: 0.1, originalLieTerrain: "fairway", cup: { x: 1.5, y: 0 }, terrainAt: green, courseBoundarySweep: staysWithinCourseBoundary });
     expect(landed.terminal).toBe("cup");
   });
   it("AC-SIM-007-02 requires exit and eligible re-entry after a fast traversal", () => {
@@ -98,7 +133,7 @@ describe("V2-SIM-007 Cup capture", () => {
     expect(reentry.terminal).toBe("cup");
   });
   it("AC-SIM-007-03 leaves airborne crossings and Flag rendering mechanically irrelevant", () => {
-    const common = { shotId: "air", round: { lie: { x: 0, y: 0 }, playedStrokes: 0, penaltyStrokes: 0, selectedClub: "driver" as const, directionIndex: 0 as never }, power: 1 as const, originalLieTerrain: "fairway" as const, cup: { x: 25, y: 0 }, terrainAt: green };
+    const common = { shotId: "air", round: { lie: { x: 0, y: 0 }, playedStrokes: 0, penaltyStrokes: 0, selectedClub: "driver" as const, directionIndex: 0 as never }, power: 1 as const, originalLieTerrain: "fairway" as const, cup: { x: 25, y: 0 }, terrainAt: green, courseBoundarySweep: staysWithinCourseBoundary };
     expect(resolveShot(common).terminal).toBe("rest");
     expect(resolveShot(common)).toEqual(resolveShot(common)); // Flag/Cup is rendering-only and absent from inputs.
   });
@@ -114,7 +149,7 @@ describe("V2-SIM-008/009 outcomes and resolved contract", () => {
       ["carry-oob", { ...round, selectedClub: "driver" as const }, () => OUT_OF_BOUNDS, "out-of-bounds"],
     ] as const;
     for (const [shotId, shotRound, terrainAt, terminal] of cases) {
-      const shot = resolveShot({ shotId, round: shotRound, power: 1, originalLieTerrain: shotRound.selectedClub === "putter" ? "green" : "fairway", cup: { x: -2, y: 0 }, terrainAt });
+      const shot = resolveShot({ shotId, round: shotRound, power: 1, originalLieTerrain: shotRound.selectedClub === "putter" ? "green" : "fairway", cup: { x: -2, y: 0 }, terrainAt, courseBoundarySweep: staysWithinCourseBoundary });
       expect(shot.terminal).toBe(terminal);
       expect(shot.resultingRound).toEqual({ lie: round.lie, playedStrokes: 3, penaltyStrokes: 2, selectedClub: shotRound.selectedClub, directionIndex: 0 });
     }
@@ -132,7 +167,7 @@ describe("V2-SIM-008/009 outcomes and resolved contract", () => {
   it("AC-SIM-008-03 normalizes Carry/Roll checkpoints then reclassifies the edge result; live/resumed state is equal", () => {
     // Unnormalized Green rest is 0.9999996 (safe); canonical six-decimal 1.000000 is Water.
     const edgeRound = { ...round, lie: { x: -0.3000004, y: 0 }, selectedClub: "putter" as const };
-    const shot = resolveShot({ shotId: "edge", round: edgeRound, power: 0.1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: (p) => p.x >= 1 ? "water" : "green" });
+    const shot = resolveShot({ shotId: "edge", round: edgeRound, power: 0.1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: (p) => p.x >= 1 ? "water" : "green", courseBoundarySweep: staysWithinCourseBoundary });
     expect(shot.terminal).toBe("water");
     expect(shot.finalPosition.x).toBe(-0.3); // normalized canonical pre-Shot Lie is restored
     for (const frame of shot.keyframes) {
@@ -144,19 +179,19 @@ describe("V2-SIM-008/009 outcomes and resolved contract", () => {
     expect(JSON.parse(JSON.stringify(toDurableShot(shot)))).toEqual(toDurableShot(shot));
   });
   it("AC-SIM-008-04 has no Power Meter state or mutation in simulator results", () => {
-    const shot = resolveShot({ shotId: "meter", round, power: 0.1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: green });
+    const shot = resolveShot({ shotId: "meter", round, power: 0.1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: green, courseBoundarySweep: staysWithinCourseBoundary });
     expect(shot).not.toHaveProperty("meter"); expect(shot.resultingRound).not.toHaveProperty("meter");
   });
   it("AC-SIM-009-01 consumes one ResolvedShot contract for simulator/persistence/playback", () => {
-    const shot = resolveShot({ shotId: "shared", round, power: 0.1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: green });
+    const shot = resolveShot({ shotId: "shared", round, power: 0.1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: green, courseBoundarySweep: staysWithinCourseBoundary });
     expect(toDurableShot(shot).shotId).toBe(shot.shotId); expect(playbackKeyframes(shot)).toEqual(shot.keyframes);
   });
   it("AC-SIM-009-02 excludes frames durably and bounds in-memory Carry/Roll frames", () => {
-    const shot = resolveShot({ shotId: "bound", round: { ...round, selectedClub: "driver" }, power: 1, originalLieTerrain: "fairway", cup: { x: -2, y: 0 }, terrainAt: green });
+    const shot = resolveShot({ shotId: "bound", round: { ...round, selectedClub: "driver" }, power: 1, originalLieTerrain: "fairway", cup: { x: -2, y: 0 }, terrainAt: green, courseBoundarySweep: staysWithinCourseBoundary });
     expect(toDurableShot(shot)).not.toHaveProperty("keyframes"); expect(shot.keyframes.length).toBeLessThanOrEqual(512);
   });
   it("AC-SIM-009-03 permits skipped/differently timed playback copies without canonical mutation", () => {
-    const shot = resolveShot({ shotId: "frames", round, power: 0.1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: green });
+    const shot = resolveShot({ shotId: "frames", round, power: 0.1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: green, courseBoundarySweep: staysWithinCourseBoundary });
     const frames = playbackKeyframes(shot);
     expect(frames[0]).not.toBe(shot.keyframes[0]);
     expect(shot.resultingRound).toEqual(shot.resultingRound);

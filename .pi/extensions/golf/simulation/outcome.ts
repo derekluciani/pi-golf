@@ -3,7 +3,7 @@ import { OUT_OF_BOUNDS, type RasterTerrain } from "../course-loader/index.ts";
 import { resolveCarry, type CarryTrajectory } from "./carry.ts";
 import { vectorFromDiscreteDirection } from "./inputs.ts";
 import { createPuttInitialState } from "./putter.ts";
-import { resolveRoll, type RollInput, type RollKeyframe, type RollTerminal } from "./roll.ts";
+import { resolveRoll, type CourseBoundarySweep, type RollKeyframe, type RollTerminal } from "./roll.ts";
 
 export type ShotTerminal = "rest" | "cup" | "water" | "out-of-bounds";
 
@@ -23,7 +23,8 @@ export interface ResolvedShotInput {
   readonly originalLieTerrain: PlayableTerrain;
   readonly cup: Point;
   readonly terrainAt: (point: Point) => RasterTerrain;
-  readonly boundaryDistance?: RollInput["boundaryDistance"];
+  /** Required exact bounded continuous Course-Boundary sweep for every Roll. */
+  readonly courseBoundarySweep: CourseBoundarySweep;
 }
 
 export interface ResolvedShot {
@@ -109,7 +110,7 @@ export function resolveShot(input: ResolvedShotInput): ResolvedShot {
   const rollInput = (position: Point, speed: number, club: Club) => ({
     position, speed, direction, club, originalLieTerrain: input.originalLieTerrain,
     cup: input.cup, terrainAt: input.terrainAt,
-    ...(input.boundaryDistance === undefined ? {} : { boundaryDistance: input.boundaryDistance }),
+    courseBoundarySweep: input.courseBoundarySweep,
   });
   if (input.round.selectedClub === "putter") {
     const putt = createPuttInitialState(input.power);
