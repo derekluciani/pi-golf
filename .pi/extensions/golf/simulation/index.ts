@@ -22,3 +22,20 @@ export {
   type CarryTrajectory,
 } from "./carry.ts";
 export { createPuttInitialState, uninterruptedPuttDistance, type PuttInitialState } from "./putter.ts";
+export { resolveRoll, rollDeceleration, type CourseBoundarySweep, type RollInput, type RollKeyframe, type RollTerminal, type RollTrajectory } from "./roll.ts";
+export {
+  PENALTY_NOTICES,
+  advancePenaltyNotice,
+  createPenaltyNotice,
+  discardPenaltyNoticeOnReload,
+  penaltyNoticeFor,
+  playbackKeyframes,
+  resolveShot,
+  toDurableShot,
+  type CompactRoundState,
+  type PenaltyNoticeState,
+  type DurableResolvedShot,
+  type ResolvedShot,
+  type ResolvedShotInput,
+  type ShotTerminal,
+} from "./outcome.ts";
