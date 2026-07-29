@@ -1,6 +1,7 @@
 import {
   CLUB_LANDING_SPEED_RETENTION,
   CLUB_NOMINAL_DISTANCES,
+  CUP,
   NUMERIC_RULES,
   TERRAIN_CARRY_MULTIPLIERS,
   type Club,
@@ -18,6 +19,8 @@ export interface CarryInput {
   readonly club: Exclude<Club, "putter">;
   readonly power: Power;
   readonly directionIndex: ShotDirectionIndex;
+  /** The authoritative Course Cup center. Its radius is always CUP.captureRadius. */
+  readonly cup: Point;
   /** Called exactly once at the continuous Landing Position; crossings are ignored. */
   readonly terrainAtLanding: (point: Point) => RasterTerrain;
 }
@@ -28,7 +31,14 @@ export interface CarryCheckpoint {
   readonly speed: number;
 }
 
-export type CarryLandingOutcome = "roll" | "water" | "out-of-bounds";
+export type CarryLandingOutcome = "roll" | "water" | "out-of-bounds" | "cup-entry";
+
+/** The bounded result of testing only the exact Carry Landing Position against the Cup. */
+export interface CarryCupEntry {
+  readonly kind: "cup-entry";
+  /** Capture is inclusive at the authoritative maximum speed. */
+  readonly captureEligible: boolean;
+}
 
 export interface CarryTrajectory {
   readonly phase: "carry";
@@ -38,6 +48,8 @@ export interface CarryTrajectory {
   readonly landingSpeed: number;
   readonly landingTerrain: RasterTerrain;
   readonly landingOutcome: CarryLandingOutcome;
+  /** Present only when the exact Landing Position enters the closed Cup disk. */
+  readonly cupEntry: CarryCupEntry | null;
   readonly checkpoints: readonly CarryCheckpoint[];
 }
 
@@ -58,6 +70,13 @@ export function carrySpeed(
   const clamped = Math.min(1, Math.max(0, u));
   return (carryDistance / duration)
     * (2 * (1 - landingSpeedRetention) * (1 - clamped) + landingSpeedRetention);
+}
+
+/** Tests the PRD's closed Cup disk using its authoritative shared radius. */
+export function isInsideClosedCupDisk(point: Point, cup: Point): boolean {
+  const deltaX = point.x - cup.x;
+  const deltaY = point.y - cup.y;
+  return deltaX * deltaX + deltaY * deltaY <= CUP.captureRadius ** 2;
 }
 
 /** Resolves a non-putter airborne Carry up to, but not including, Roll. */
@@ -83,6 +102,14 @@ export function resolveCarry(input: CarryInput): CarryTrajectory {
   for (let frame = 1; frame * step < duration; frame += 1) checkpoints.push(checkpointAt(frame * step));
   const landing = checkpointAt(duration);
   const landingTerrain = input.terrainAtLanding(landing.position);
+  // OOB and Water take precedence before Carry hands the ball to Roll/Cup handling.
+  const landingOutcome = landingTerrain === OUT_OF_BOUNDS
+    ? "out-of-bounds"
+    : landingTerrain === "water" ? "water"
+    : isInsideClosedCupDisk(landing.position, input.cup) ? "cup-entry" : "roll";
+  const cupEntry: CarryCupEntry | null = landingOutcome === "cup-entry"
+    ? { kind: "cup-entry", captureEligible: landing.speed <= CUP.maximumCaptureSpeed }
+    : null;
   return {
     phase: "carry",
     carryDistance,
@@ -90,9 +117,8 @@ export function resolveCarry(input: CarryInput): CarryTrajectory {
     landingPosition: landing.position,
     landingSpeed: landing.speed,
     landingTerrain,
-    landingOutcome: landingTerrain === OUT_OF_BOUNDS
-      ? "out-of-bounds"
-      : landingTerrain === "water" ? "water" : "roll",
+    landingOutcome,
+    cupEntry,
     checkpoints: [...checkpoints, landing],
   };
 }

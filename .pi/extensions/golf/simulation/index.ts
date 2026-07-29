@@ -13,8 +13,10 @@ export { projectTarget, targetDistance, type TargetPathKind, type TargetProjecti
 export {
   carryProgress,
   carrySpeed,
+  isInsideClosedCupDisk,
   resolveCarry,
   type CarryCheckpoint,
+  type CarryCupEntry,
   type CarryInput,
   type CarryLandingOutcome,
   type CarryTrajectory,

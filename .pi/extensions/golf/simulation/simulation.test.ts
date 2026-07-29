@@ -11,7 +11,7 @@ import {
   type PlayableTerrain,
   type Point,
 } from "../domain/index.ts";
-import { OUT_OF_BOUNDS, type RasterTerrain } from "../course-loader/index.ts";
+import { OUT_OF_BOUNDS } from "../course-loader/index.ts";
 import {
   carryProgress,
   carrySpeed,
@@ -29,6 +29,7 @@ import {
 } from "./index.ts";
 
 const direction = quantizeShotDirection(0);
+const cupOutsideCarryPath = { x: -1, y: -1 };
 const nearly = (actual: number, expected: number): void => {
   expect(actual).toBeCloseTo(expected, 12);
 };
@@ -73,7 +74,7 @@ describe("V2-SIM-001 shot inputs", () => {
     const northeast = quantizeShotDirection(45);
     const carry = resolveCarry({
       lie: { x: 0, y: 0 }, lieTerrain: "fairway", club: "driver", power: 1,
-      directionIndex: northeast, terrainAtLanding: () => "fairway",
+      directionIndex: northeast, cup: cupOutsideCarryPath, terrainAtLanding: () => "fairway",
     });
     const exact = Math.SQRT1_2 * 50;
     nearly(carry.landingPosition.x, exact);
@@ -142,7 +143,7 @@ describe("V2-SIM-002 shared Target projection", () => {
     });
     const carry = resolveCarry({
       lie: target.origin, lieTerrain: "rough", club: "driver", power: 1,
-      directionIndex: direction, terrainAtLanding: () => "rough",
+      directionIndex: direction, cup: cupOutsideCarryPath, terrainAtLanding: () => "rough",
     });
     expect(target.distance).toBe(50);
     expect(carry.carryDistance).toBe(35);
@@ -158,7 +159,7 @@ describe("V2-SIM-003 non-Putter Carry", () => {
       if (retention === null) throw new Error("Non-Putter retention missing.");
       const carry = resolveCarry({
         lie: { x: 3, y: 4 }, lieTerrain: "fairway", club, power, directionIndex: direction,
-        terrainAtLanding: () => "fairway",
+        cup: cupOutsideCarryPath, terrainAtLanding: () => "fairway",
       });
       const length = CLUB_NOMINAL_DISTANCES[club] * power;
       const duration = 3 * Math.sqrt(power);
@@ -184,7 +185,7 @@ describe("V2-SIM-003 non-Putter Carry", () => {
 
   it("AC-SIM-003-02 applies exact Rough/Bunker Carry multipliers while Target retains Fairway projection", () => {
     for (const [terrain, multiplier] of Object.entries(TERRAIN_CARRY_MULTIPLIERS) as [PlayableTerrain, number][]) {
-      const carry = resolveCarry({ lie: { x: 0, y: 0 }, lieTerrain: terrain, club: "driver", power: 1, directionIndex: direction, terrainAtLanding: () => "fairway" });
+      const carry = resolveCarry({ lie: { x: 0, y: 0 }, lieTerrain: terrain, club: "driver", power: 1, directionIndex: direction, cup: cupOutsideCarryPath, terrainAtLanding: () => "fairway" });
       nearly(carry.carryDistance, 50 * multiplier);
       const target = projectTarget({ lie: { x: 0, y: 0 }, lieTerrain: terrain, club: "driver", power: 1, directionIndex: direction, isInsideCourseBoundary: () => true });
       expect(target.distance).toBe(50);
@@ -192,28 +193,49 @@ describe("V2-SIM-003 non-Putter Carry", () => {
   });
 
   it("AC-SIM-003-03 ignores airborne Terrain/Water/Boundary/Cup crossings and evaluates only exact landing", () => {
-    let calls = 0;
-    const crossed: RasterTerrain[] = ["water", OUT_OF_BOUNDS, "green"];
-    const carry = resolveCarry({
-      lie: { x: 0, y: 0 }, lieTerrain: "fairway", club: "driver", power: 1, directionIndex: direction,
-      terrainAtLanding: (point) => { calls += 1; expect(point.x).toBe(50); return crossed[2] ?? "green"; },
+    let terrainCalls = 0;
+    const airborneCup = resolveCarry({
+      lie: { x: 0, y: 0 }, lieTerrain: "fairway", club: "driver", power: 1,
+      directionIndex: direction, cup: { x: 25, y: 0 },
+      terrainAtLanding: (point) => { terrainCalls += 1; expect(point.x).toBe(50); return "green"; },
     });
-    expect(calls).toBe(1);
-    expect(carry.landingOutcome).toBe("roll");
-    expect(carry.landingTerrain).toBe("green");
-    expect(crossed).toContain("water");
-    expect(crossed).toContain(OUT_OF_BOUNDS);
+    expect(terrainCalls).toBe(1);
+    expect(airborneCup.landingOutcome).toBe("roll");
+    expect(airborneCup.cupEntry).toBeNull();
+
+    const closedDiskLanding = resolveCarry({
+      lie: { x: 0, y: 0 }, lieTerrain: "fairway", club: "pw", power: 1,
+      directionIndex: direction, cup: { x: 15.35, y: 0 }, terrainAtLanding: () => "green",
+    });
+    expect(closedDiskLanding.landingOutcome).toBe("cup-entry");
+    expect(closedDiskLanding.cupEntry).toEqual({ kind: "cup-entry", captureEligible: true });
+
+    const fastCupEntry = resolveCarry({
+      lie: { x: 0, y: 0 }, lieTerrain: "fairway", club: "driver", power: 1,
+      directionIndex: direction, cup: { x: 50, y: 0 }, terrainAtLanding: () => "green",
+    });
+    expect(fastCupEntry.landingOutcome).toBe("cup-entry");
+    expect(fastCupEntry.cupEntry).toEqual({ kind: "cup-entry", captureEligible: false });
+
+    const outsideCup = resolveCarry({
+      lie: { x: 0, y: 0 }, lieTerrain: "fairway", club: "pw", power: 1,
+      directionIndex: direction, cup: { x: 15.350000001, y: 0 }, terrainAtLanding: () => "green",
+    });
+    expect(outsideCup.landingOutcome).toBe("roll");
+    expect(outsideCup.cupEntry).toBeNull();
+
     for (const [landingTerrain, outcome] of [["water", "water"], [OUT_OF_BOUNDS, "out-of-bounds"]] as const) {
       const landed = resolveCarry({
         lie: { x: 0, y: 0 }, lieTerrain: "fairway", club: "driver", power: 1,
-        directionIndex: direction, terrainAtLanding: () => landingTerrain,
+        directionIndex: direction, cup: { x: 50, y: 0 }, terrainAtLanding: () => landingTerrain,
       });
       expect(landed.landingOutcome).toBe(outcome);
+      expect(landed.cupEntry).toBeNull();
     }
   });
 
   it("AC-SIM-003-04 retains final prior 1/120 grid checkpoint and exact unrounded T", () => {
-    const carry = resolveCarry({ lie: { x: 0, y: 0 }, lieTerrain: "fairway", club: "driver", power: 0.2, directionIndex: direction, terrainAtLanding: () => "fairway" });
+    const carry = resolveCarry({ lie: { x: 0, y: 0 }, lieTerrain: "fairway", club: "driver", power: 0.2, directionIndex: direction, cup: cupOutsideCarryPath, terrainAtLanding: () => "fairway" });
     const duration = 3 * Math.sqrt(0.2);
     const prior = Math.floor(duration * 120) / 120;
     const finalPrior = carry.checkpoints.at(-2);
