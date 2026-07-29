@@ -48,12 +48,13 @@ export interface RollTrajectory {
 
 interface Candidate {
   readonly distance: number;
+  readonly time: number;
   readonly kind: "terrain" | "water" | "out-of-bounds" | "cup";
   readonly terrain?: RasterTerrain;
 }
 
 const MAX_KEYFRAMES = 512;
-const PROBE = 1e-10;
+const PRECEDENCE = { "out-of-bounds": 4, water: 3, cup: 2, terrain: 1 } as const;
 
 /** Exact terrain deceleration, including the non-Putter Green modifier. */
 export function rollDeceleration(
@@ -92,15 +93,34 @@ function cupEntryDistance(position: Point, direction: Point, cup: Point, maximum
   return entry >= 0 && entry <= maximum ? entry : null;
 }
 
-/** Distance to the next raster-cell edge in the direction of travel. */
-function nextCellDistance(position: Point, direction: Point): number {
+/** Returns every immediately reachable raster-cell edge, including exact negative edges at zero distance. */
+function nextCellCrossings(position: Point, direction: Point): readonly number[] {
   const distances: number[] = [];
   if (direction.x > 0) distances.push((Math.floor(position.x) + 1 - position.x) / direction.x);
-  if (direction.x < 0) distances.push((position.x - Math.floor(position.x)) / -direction.x || 1 / -direction.x);
+  if (direction.x < 0) distances.push((position.x - Math.floor(position.x)) / -direction.x);
   if (direction.y > 0) distances.push((Math.floor(position.y) + 1 - position.y) / direction.y);
-  if (direction.y < 0) distances.push((position.y - Math.floor(position.y)) / -direction.y || 1 / -direction.y);
-  const distance = Math.min(...distances.filter((value) => value > 0));
-  return Number.isFinite(distance) ? distance : Number.POSITIVE_INFINITY;
+  if (direction.y < 0) distances.push((position.y - Math.floor(position.y)) / -direction.y);
+  return distances.filter((distance) => Number.isFinite(distance) && distance >= 0);
+}
+
+/**
+ * Samples the adjacent raster cell with the next representable IEEE-754 value,
+ * not an application epsilon. Event position/time remain the exact crossing.
+ */
+function nextRepresentable(value: number, direction: number): number {
+  if (direction === 0 || !Number.isFinite(value)) return value;
+  if (value === 0) return direction > 0 ? Number.MIN_VALUE : -Number.MIN_VALUE;
+  const bytes = new ArrayBuffer(8);
+  const view = new DataView(bytes);
+  view.setFloat64(0, value);
+  let bits = view.getBigUint64(0);
+  bits += (value > 0) === (direction > 0) ? 1n : -1n;
+  view.setBigUint64(0, bits);
+  return view.getFloat64(0);
+}
+
+function justBeyond(point: Point, direction: Point): Point {
+  return { x: nextRepresentable(point.x, direction.x), y: nextRepresentable(point.y, direction.y) };
 }
 
 function canonicalKeyframes(keyframes: readonly RollKeyframe[]): readonly RollKeyframe[] {
@@ -115,6 +135,15 @@ function canonicalKeyframes(keyframes: readonly RollKeyframe[]): readonly RollKe
   }
   result.push(last);
   return result;
+}
+
+function selectEarliest(candidates: readonly Candidate[]): Candidate | null {
+  return candidates.reduce<Candidate | null>((best, candidate) => {
+    if (best === null || candidate.time < best.time - NUMERIC_RULES.rollEventTimeTieToleranceSeconds) return candidate;
+    if (Math.abs(candidate.time - best.time) <= NUMERIC_RULES.rollEventTimeTieToleranceSeconds
+      && PRECEDENCE[candidate.kind] > PRECEDENCE[best.kind]) return candidate;
+    return best;
+  }, null);
 }
 
 /**
@@ -157,34 +186,28 @@ export function resolveRoll(input: RollInput): RollTrajectory {
       const localTime = Math.min(remaining, restTime);
       const maximumDistance = speed * localTime - 0.5 * deceleration * localTime * localTime;
       const candidates: Candidate[] = [];
-      const cellDistance = nextCellDistance(position, direction);
-      if (cellDistance <= maximumDistance) {
-        const after = pointAt(position, direction, cellDistance + PROBE);
-        const nextTerrain = input.terrainAt(after);
-        if (nextTerrain !== terrain) candidates.push({
-          distance: cellDistance,
-          kind: nextTerrain === OUT_OF_BOUNDS ? "out-of-bounds" : nextTerrain === "water" ? "water" : "terrain",
-          terrain: nextTerrain,
-        });
+      for (const distance of nextCellCrossings(position, direction)) {
+        if (distance <= maximumDistance) {
+          const eventPosition = pointAt(position, direction, distance);
+          const nextTerrain = input.terrainAt(justBeyond(eventPosition, direction));
+          candidates.push({
+            distance,
+            time: timeForDistance(speed, deceleration, distance),
+            kind: nextTerrain === OUT_OF_BOUNDS ? "out-of-bounds" : nextTerrain === "water" ? "water" : "terrain",
+            terrain: nextTerrain,
+          });
+        }
       }
       const boundaryDistance = input.boundaryDistance?.(position, direction, maximumDistance) ?? null;
       if (boundaryDistance !== null && boundaryDistance >= 0 && boundaryDistance <= maximumDistance) {
-        candidates.push({ distance: boundaryDistance, kind: "out-of-bounds" });
+        candidates.push({ distance: boundaryDistance, time: timeForDistance(speed, deceleration, boundaryDistance), kind: "out-of-bounds" });
       }
       if (!insideCup) {
         const entry = cupEntryDistance(position, direction, input.cup, maximumDistance);
-        if (entry !== null) candidates.push({ distance: entry, kind: "cup" });
+        if (entry !== null) candidates.push({ distance: entry, time: timeForDistance(speed, deceleration, entry), kind: "cup" });
       }
 
-      const earliest = candidates.reduce<Candidate | null>((best, candidate) => {
-        if (best === null || candidate.distance < best.distance - NUMERIC_RULES.rollEventTimeTieToleranceSeconds * Math.max(speed, 1)) return candidate;
-        if (Math.abs(candidate.distance - best.distance) <= NUMERIC_RULES.rollEventTimeTieToleranceSeconds * Math.max(speed, 1)) {
-          const precedence = { "out-of-bounds": 4, water: 3, cup: 2, terrain: 1 } as const;
-          return precedence[candidate.kind] > precedence[best.kind] ? candidate : best;
-        }
-        return best;
-      }, null);
-
+      const earliest = selectEarliest(candidates);
       if (earliest === null) {
         position = pointAt(position, direction, maximumDistance);
         speed -= deceleration * localTime;
@@ -194,21 +217,21 @@ export function resolveRoll(input: RollInput): RollTrajectory {
         // A completed traversal that is no longer inside permits a later re-entry.
         if (insideCup && !isInsideCup(position, input.cup)) insideCup = false;
       } else {
-        const eventTime = timeForDistance(speed, deceleration, earliest.distance);
         position = pointAt(position, direction, earliest.distance);
-        speed -= deceleration * eventTime;
-        elapsed += eventTime;
-        remaining -= eventTime;
+        speed -= deceleration * earliest.time;
+        elapsed += earliest.time;
+        remaining -= earliest.time;
         if (earliest.kind === "out-of-bounds") terminal = "out-of-bounds";
         else if (earliest.kind === "water") terminal = "water";
         else if (earliest.kind === "cup") {
           insideCup = true;
           if (speed <= CUP.maximumCaptureSpeed) terminal = "cup";
-          else {
-            // Move an infinitesimal distance into the disk so this entry cannot be retried.
-            position = pointAt(position, direction, PROBE);
-          }
-        } else if (earliest.terrain !== undefined) terrain = earliest.terrain;
+          else position = justBeyond(position, direction);
+        } else if (earliest.terrain !== undefined) {
+          terrain = earliest.terrain;
+          // Cross even unchanged cells so a farther transition in this outer step is found.
+          position = justBeyond(position, direction);
+        }
       }
     }
     keyframes.push({ elapsed, position: { ...position }, speed: Math.max(0, speed) });

@@ -88,6 +88,13 @@ function normalized(value: number): number {
 function normalizedPoint(point: Point): Point {
   return { x: normalized(point.x), y: normalized(point.y) };
 }
+function normalizedKeyframe(keyframe: RollKeyframe): RollKeyframe {
+  return {
+    elapsed: normalized(keyframe.elapsed),
+    position: normalizedPoint(keyframe.position),
+    speed: normalized(keyframe.speed),
+  };
+}
 
 /** Resolves Carry/Putt and Roll before any presentation consumer can observe the result. */
 export function resolveShot(input: ResolvedShotInput): ResolvedShot {
@@ -156,6 +163,8 @@ export function resolveShot(input: ResolvedShotInput): ResolvedShot {
       return frame;
     });
   }
+  // These are canonical simulation checkpoints, unlike renderer interpolation frames.
+  keyframes = keyframes.map(normalizedKeyframe);
   return {
     shotId: input.shotId,
     preShotLie: normalizedPoint(input.round.lie),
