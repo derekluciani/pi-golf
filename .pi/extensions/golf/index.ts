@@ -30,7 +30,11 @@ export default function registerGolfExtension(pi: ExtensionAPI): void {
         const direction = parseShotDirectionIndex(quantizeShotDirection(bearingToward(firstHole.tee, firstHole.cup)));
         if (direction === undefined) throw new Error("Preview Round direction is invalid.");
         // This awaited append is the T09 durability boundary before T11 activates gameplay.
-        await appendRoundStart(store, { roundId: randomUUID(), snapshot, branchId, state: { kind: "persisted-round", courseId, currentHoleIndex: holeIndex, lie: firstHole.tee, selectedClub: "driver", shotDirectionIndex: direction, holeScores: [], status: "active" } });
+        const roundId = randomUUID();
+        const started = await appendRoundStart(store, { roundId, snapshot, branchId, state: { kind: "persisted-round", courseId, currentHoleIndex: holeIndex, lie: firstHole.tee, selectedClub: "driver", shotDirectionIndex: direction, holeScores: [], status: "active" } });
+        // Pi's real custom-entry shape is the branch mirror. It is deliberately written
+        // only after the authoritative JSONL start; a fork therefore selects its prefix.
+        pi.appendEntry("pi-golf-round-v1", { roundId, revision: started.revision });
       }
       ctx.ui.notify(`Pi Golf foundation v${FOUNDATION_CONTRACT_VERSION} durable Round ${recovered === null ? "started" : "recovered"}.`, "info");
     },

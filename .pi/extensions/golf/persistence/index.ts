@@ -58,11 +58,18 @@ export interface ReconstructedRound { readonly roundId: string; readonly revisio
 /** Strictly validates ordering and semantic state transitions; there is never an older-entry fallback. */
 export function reconstructRound(entries: readonly unknown[]): ReconstructedRound {
   if (entries.length === 0) throw new Error("Round log is empty."); const parsed = entries.map(parseGolfEntry); const start = parsed[0]; if (start === undefined || start.kind !== "round-start" || start.revision !== 0) throw new Error("Round log must begin with round-start revision 0.");
+  const parsedCourse = parseCourseJson(start.payload.courseSnapshot);
+  if (!parsedCourse.ok) throw new Error("Invalid immutable Course snapshot.");
+  const conformsToSnapshot = (state: PersistedRoundState): boolean => state.courseId === parsedCourse.value.id && state.currentHoleIndex < parsedCourse.value.holes.length && state.holeScores.every((score) => {
+    const hole = parsedCourse.value.holes[score.hole.courseIndex];
+    return hole !== undefined && hole.id === score.hole.id && hole.number === score.hole.number;
+  });
+  if (!conformsToSnapshot(start.payload.state)) throw new Error("Round state does not match immutable Course snapshot.");
   let current = start.payload.state; let lifecycle: Lifecycle = "aiming"; let terminal = false; let replacement: string | null = null; let successorStart: RoundStartPayload | null = null; const shots = new Set<string>();
   for (const [index, entry] of parsed.entries()) { if (entry.roundId !== start.roundId || entry.revision !== index) throw new Error("Invalid Round revision chain."); if (index === 0) continue; if (terminal || replacement !== null || entry.kind === "round-start") throw new Error("Invalid entry after terminal/replacement.");
-    if (entry.kind === "shot") { if (shots.has(entry.payload.shot.shotId) || entry.payload.shot.preShotLie.x !== current.lie.x || entry.payload.shot.preShotLie.y !== current.lie.y) throw new Error("Incoherent Shot transition."); shots.add(entry.payload.shot.shotId); current = entry.payload.state; lifecycle = entry.payload.shot.terminal === "cup" ? "hole-summary" : "aiming"; }
-    if (entry.kind === "checkpoint") { current = entry.payload.state; lifecycle = entry.payload.lifecycle; }
-    if (entry.kind === "round-terminal") { current = entry.payload.state; terminal = true; lifecycle = "round-summary"; }
+    if (entry.kind === "shot") { if (!conformsToSnapshot(entry.payload.state) || shots.has(entry.payload.shot.shotId) || entry.payload.shot.preShotLie.x !== current.lie.x || entry.payload.shot.preShotLie.y !== current.lie.y) throw new Error("Incoherent Shot transition."); shots.add(entry.payload.shot.shotId); current = entry.payload.state; lifecycle = entry.payload.shot.terminal === "cup" ? "hole-summary" : "aiming"; }
+    if (entry.kind === "checkpoint") { if (!conformsToSnapshot(entry.payload.state) || entry.payload.state.currentHoleIndex !== current.currentHoleIndex || JSON.stringify(entry.payload.state.holeScores) !== JSON.stringify(current.holeScores) || entry.payload.state.lie.x !== current.lie.x || entry.payload.state.lie.y !== current.lie.y) throw new Error("Incoherent checkpoint transition."); current = entry.payload.state; lifecycle = entry.payload.lifecycle; }
+    if (entry.kind === "round-terminal") { if (!conformsToSnapshot(entry.payload.state) || (entry.payload.status === "complete" && entry.payload.state.currentHoleIndex !== parsedCourse.value.holes.length - 1)) throw new Error("Incoherent terminal transition."); current = entry.payload.state; terminal = true; lifecycle = "round-summary"; }
     if (entry.kind === "round-replacement") { if (entry.payload.successorRoundId === start.roundId || entry.payload.successorStart.state.status !== "active") throw new Error("Invalid Round replacement."); replacement = entry.payload.successorRoundId; successorStart = entry.payload.successorStart; terminal = true; }
   } return { roundId: start.roundId, revision: parsed.length - 1, state: current, lifecycle, terminal, replacement, successorStart, branchId: start.payload.branchId };
 }
@@ -76,6 +83,10 @@ export class RoundStore {
   async append(entry: GolfEntryV1): Promise<void> { const v = parseGolfEntry(entry); const path = this.pathFor(v.roundId); await mkdir(this.#root, { recursive: true }); const existed = await stat(path).then(() => true, () => false); await this.#boundary("open"); const file = await open(path, "a"); await this.#boundary("open", true); try { await this.#boundary("write"); await file.writeFile(`${JSON.stringify(v)}\n`, "utf8"); await this.#boundary("write", true); await this.#boundary("file-sync"); await file.sync(); await this.#boundary("file-sync", true); } finally { await file.close(); } if (!existed) { await this.#boundary("directory-sync"); const directory = await open(this.#root, "r"); try { await directory.sync(); await this.#boundary("directory-sync", true); } finally { await directory.close(); } } }
   async #entries(roundId: string): Promise<unknown[]> { const path = this.pathFor(roundId); if ((await stat(path)).size > MAX_LOG_BYTES) throw new Error("Round log exceeds bound."); const raw = await readFile(path, "utf8"); const lines = raw.split("\n"); lines.pop(); return lines.map((line) => { try { return JSON.parse(line) as unknown; } catch { throw new Error("Malformed committed Round entry."); } }); }
   async read(roundId: string): Promise<ReconstructedRound> { return reconstructRound(await this.#entries(roundId)); }
+  /** Strictly exposes only the persisted successor start for replacement association checks. */
+  async startEntry(roundId: string): Promise<Extract<ValidGolfEntry, { readonly kind: "round-start" }>> { const first = parseGolfEntry((await this.#entries(roundId))[0]); if (first.kind !== "round-start") throw new Error("Successor lacks round-start."); return first; }
+  async entryAt(roundId: string, revision: number): Promise<ValidGolfEntry> { const entries = await this.#entries(roundId); reconstructRound(entries); const entry = entries[revision]; if (entry === undefined) throw new Error("Round revision is absent."); return parseGolfEntry(entry); }
+  async hasRound(roundId: string): Promise<boolean> { return stat(this.pathFor(roundId)).then(() => true, () => false); }
   /** Validate the whole authoritative log before selecting the branch's historical prefix. */
   async readAtRevision(roundId: string, revision: number): Promise<ReconstructedRound> { const entries = await this.#entries(roundId); reconstructRound(entries); if (!integer(revision) || revision < 0 || revision >= entries.length) throw new Error("Branch Round reference revision is invalid."); return reconstructRound(entries.slice(0, revision + 1)); }
   async findByBranch(branchId: string): Promise<ReconstructedRound[]> { const names = (await readdir(this.#root).catch(() => [])).filter((n) => /^[a-z0-9][a-z0-9_-]{0,63}\.jsonl$/u.test(n)).sort().slice(0, MAX_ROUND_FILES); const all = await Promise.all(names.map(async (n) => this.read(n.slice(0, -6)).catch(() => { throw new Error("Invalid durable Round log."); }))); return all.filter((round) => round.branchId === branchId); }
@@ -90,7 +101,10 @@ export async function reconstructActiveBranch(store: RoundStore, branch: readonl
   for (const entry of branch) { if (typeof entry.id !== "string" || entry.id.length === 0 || (prior !== undefined && entry.parentId !== prior.id)) throw new Error("Malformed Pi branch path."); prior = entry; if (entry.type !== "custom" || entry.customType !== GOLF_BRANCH_REFERENCE_TYPE) continue; const ref = parseBranchRoundReference(entry.data); if (ref === undefined) throw new Error("Malformed Golf branch reference."); const round = await store.readAtRevision(ref.roundId, ref.revision); if (selected !== null && (selected.roundId !== round.roundId || round.revision < selected.revision)) throw new Error("Incoherent Golf branch references."); selected = round; }
   if (selected !== null) {
     if (selected.replacement !== null && selected.successorStart !== null) {
-      return reconstructRound([{ entryVersion: 1, roundId: selected.replacement, revision: 0, kind: "round-start", payload: selected.successorStart }]);
+      const successor = await store.read(selected.replacement);
+      const successorStart = await store.startEntry(selected.replacement);
+      if (JSON.stringify(selected.successorStart) !== JSON.stringify(successorStart.payload)) throw new Error("Replacement successor is not authoritatively associated.");
+      return successor;
     }
     return selected;
   }
@@ -98,15 +112,29 @@ export async function reconstructActiveBranch(store: RoundStore, branch: readonl
 }
 export async function appendRoundStart(store: RoundStore, args: { readonly roundId: string; readonly snapshot: RoundCourseSnapshot; readonly state: PersistedRoundState; readonly branchId: string }): Promise<ReconstructedRound> { await store.append({ entryVersion: 1, roundId: args.roundId, revision: 0, kind: "round-start", payload: { courseSnapshot: args.snapshot.serializedCourse, state: args.state, branchId: args.branchId } }); return store.read(args.roundId); }
 
-const writers = new WeakMap<RoundStore, Map<string, RoundMutationWriter>>();
+/** Persist a successor before linking it; recovery only follows a real authoritative successor log. */
+export async function appendRoundReplacement(store: RoundStore, args: { readonly predecessorRoundId: string; readonly predecessorRevision: number; readonly successorRoundId: string; readonly successorSnapshot: RoundCourseSnapshot; readonly successorState: PersistedRoundState; readonly branchId: string }): Promise<void> {
+  if (args.successorRoundId === args.predecessorRoundId || await store.hasRound(args.successorRoundId)) throw new Error("Successor Round identity is not unique.");
+  const successor = await appendRoundStart(store, { roundId: args.successorRoundId, snapshot: args.successorSnapshot, state: args.successorState, branchId: args.branchId });
+  if (successor.revision !== 0) throw new Error("Successor Round start is not unique.");
+  await store.append({ entryVersion: 1, roundId: args.predecessorRoundId, revision: args.predecessorRevision + 1, kind: "round-replacement", payload: { successorRoundId: args.successorRoundId, successorStartRevision: 0, successorStart: { courseSnapshot: args.successorSnapshot.serializedCourse, state: args.successorState, branchId: args.branchId } } });
+}
+
+/** A session authority must survive transient RoundStore wrappers created by command invocations. */
+const writers = new Map<string, RoundMutationWriter>();
 /** One authority per (store, session, Round); callers cannot independently construct a competing writer. */
 export class RoundMutationWriter {
   #tail: Promise<void> = Promise.resolve(); #pendingShotId: string | null = null; #shotCommit: { readonly shotId: string; readonly promise: Promise<number> } | null = null;
   private constructor(private readonly store: RoundStore, private readonly roundId: string, private revision: number) {}
-  static forSession(store: RoundStore, sessionId: string, roundId: string, revision: number): RoundMutationWriter { let sessions = writers.get(store); if (sessions === undefined) { sessions = new Map(); writers.set(store, sessions); } const key = `${sessionId}\u0000${roundId}`; const existing = sessions.get(key); if (existing !== undefined) return existing; const writer = new RoundMutationWriter(store, roundId, revision); sessions.set(key, writer); return writer; }
+  static forSession(store: RoundStore, sessionId: string, roundId: string, revision: number): RoundMutationWriter { const key = `${sessionId}\u0000${roundId}`; const existing = writers.get(key); if (existing !== undefined) return existing; const writer = new RoundMutationWriter(store, roundId, revision); writers.set(key, writer); return writer; }
   get pendingShotId(): string | null { return this.#pendingShotId; }
   async append(entry: Omit<GolfEntryV1, "roundId" | "revision" | "entryVersion">): Promise<number> { let result = 0; const work = this.#tail.then(async () => { const next = this.revision + 1; await this.store.append({ ...entry, entryVersion: 1, roundId: this.roundId, revision: next }); this.revision = next; result = next; }); this.#tail = work.catch(() => undefined); await work; return result; }
   beginShot(shotId: string): boolean { if (this.#pendingShotId !== null && this.#pendingShotId !== shotId) return false; this.#pendingShotId ??= shotId; return true; }
   cancelPendingShot(shotId: string): boolean { if (this.#shotCommit !== null || this.#pendingShotId !== shotId) return false; this.#pendingShotId = null; return true; }
-  commitShot(shot: DurableResolvedShot, state: PersistedRoundState): Promise<number> { if (this.#shotCommit !== null) return this.#shotCommit.shotId === shot.shotId ? this.#shotCommit.promise : Promise.reject(new Error("Another Shot is committing.")); if (!this.beginShot(shot.shotId)) return Promise.reject(new Error("Another Shot is committing.")); const promise = this.append({ kind: "shot", payload: { shot, state } }).then((revision) => { this.#pendingShotId = null; this.#shotCommit = null; return revision; }, (error: unknown) => { this.#shotCommit = null; throw error; }); this.#shotCommit = { shotId: shot.shotId, promise }; return promise; }
+  commitShot(shot: DurableResolvedShot, state: PersistedRoundState): Promise<number> { if (this.#shotCommit !== null) return this.#shotCommit.shotId === shot.shotId ? this.#shotCommit.promise : Promise.reject(new Error("Another Shot is committing.")); if (!this.beginShot(shot.shotId)) return Promise.reject(new Error("Another Shot is committing.")); const expectedRevision = this.revision + 1; const promise = this.append({ kind: "shot", payload: { shot, state } }).then((revision) => { this.#pendingShotId = null; this.#shotCommit = null; return revision; }, async (error: unknown) => {
+      // A sync failure is uncertain: the newline may already be durable. Never retry until
+      // the authoritative chain proves whether this exact shot/revision committed.
+      try { const durable = await this.store.readAtRevision(this.roundId, expectedRevision); const committed = await this.store.entryAt(this.roundId, expectedRevision); if (durable.revision === expectedRevision && committed.kind === "shot" && committed.payload.shot.shotId === shot.shotId) { this.revision = expectedRevision; this.#pendingShotId = null; this.#shotCommit = null; return expectedRevision; } } catch { /* predecessor remains retryable with the retained shot identity. */ }
+      this.#shotCommit = null; throw error;
+    }); this.#shotCommit = { shotId: shot.shotId, promise }; return promise; }
 }

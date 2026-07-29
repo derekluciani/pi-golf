@@ -14,6 +14,9 @@ session has no reliably flushed custom entry in Pi 0.82.1, so only when the bran
 to the durable `round-start.branchId` association. Ambiguous, malformed, or
 newest-invalid logs fail closed; recovery never selects an earlier valid state.
 
-T11 owns command lifecycle and must consume this seam. It may append a branch
-reference after the durable start, but must not treat that mirror as a persistence
-boundary or change the append-before-gameplay ordering.
+The T09 first-action seam calls Pi's `pi.appendEntry("pi-golf-round-v1", { roundId,
+revision })` immediately after the authoritative `round-start` append. This is a
+branch mirror, not a durability boundary: Pi forks retain the reference prefix and
+reconstruction selects that exact JSONL revision. T11 owns all later command
+lifecycle, but must preserve this append-before-gameplay ordering and append the
+same shaped mirror after its durable mutations.
