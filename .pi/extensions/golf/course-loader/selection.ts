@@ -1,5 +1,4 @@
 import { isAbsolute, resolve } from "node:path";
-import { realpath } from "node:fs/promises";
 
 import { loadPreviewCourse } from "../courses/index.ts";
 import {
@@ -139,17 +138,28 @@ export async function selectCourseFromPath(
   return { ok: true, selected: loaded.value, settings };
 }
 
-/** Persists either the built-in option or one previously validated discovery record. */
+/**
+ * Commits either Preview or a catalog option. A catalog record is display-time
+ * data only: reload its source at this exported commit boundary so replacement
+ * cannot persist stale identity or bytes.
+ */
 export async function selectLoadedCourse(
   cwd: string,
   selected: LoadedCourseFile | "preview",
 ): Promise<CourseSettings> {
-  if (selected !== "preview" && selected.course.id === PREVIEW_COURSE_ID) {
-    throw new Error("Refusing to persist an external Course using Preview Course identity.");
+  if (selected === "preview") {
+    await writeCourseSettings(cwd, PREVIEW_COURSE_SETTINGS);
+    return PREVIEW_COURSE_SETTINGS;
   }
-  const settings = selected === "preview"
-    ? PREVIEW_COURSE_SETTINGS
-    : { selectedCourseId: selected.course.id, sourcePath: await realpath(selected.sourcePath) };
+
+  const fresh = await loadSelectableCourseFile(selected.sourcePath);
+  if (!fresh.ok) {
+    throw new Error(`Cannot select Course: ${fresh.issue.message}`);
+  }
+  const settings: CourseSettings = {
+    selectedCourseId: fresh.value.course.id,
+    sourcePath: fresh.value.sourcePath,
+  };
   await writeCourseSettings(cwd, settings);
   return settings;
 }

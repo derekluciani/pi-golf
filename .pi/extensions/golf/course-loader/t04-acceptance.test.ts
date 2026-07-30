@@ -66,7 +66,24 @@ describe("V2-T04 discovery and settings acceptance", () => {
     const cwd = await root(); const courses = join(cwd, ".pi/golf/courses"); await mkdir(courses, { recursive: true }); const changed = join(courses, "changed.json"); await writeFile(changed, valid("old")); await selectCourseFromPath(cwd, changed); await writeFile(changed, valid("new"));
     const snapshot = await captureSelectedCourseSnapshot(cwd); const catalog = reconcileCourseCatalog({ preview: PREVIEW_COURSE_CATALOG, coursesDirectory: courses, discovery: await discoverCourses(courses), selectedSnapshot: snapshot });
     expect(snapshot.usedPreviewFallback).toBe(true); expect(catalog.options.map((option) => option.courseId)).toEqual(["preview-course"]);
-    const reserved = await loaded(changed); await expect(selectLoadedCourse(cwd, { ...reserved, course: { ...reserved.course, id: "preview-course" } })).rejects.toThrow("Preview Course identity");
+    await writeFile(changed, valid("preview-course"));
+    const reserved = await loaded(changed); await expect(selectLoadedCourse(cwd, reserved)).rejects.toThrow("reserved by Preview Course");
+  });
+
+  it("AC-CRS-007-01 AC-CRS-007-02 AC-CRS-008-04 commits a fresh canonical record from a catalog/UI-time option and preserves prior selection on replacement failure", async () => {
+    const cwd = await root(); const courses = join(cwd, ".pi/golf/courses"); await mkdir(courses, { recursive: true });
+    const source = join(courses, "candidate.json"); await writeFile(source, valid("catalog-id", "Catalog Course"));
+    const model = buildCourseSettingsModel(courses, await discoverCourses(courses), await captureSelectedCourseSnapshot(cwd));
+    const catalogOption = model.options.find((option) => option.courseId === "catalog-id");
+    if (catalogOption?.loaded === undefined || catalogOption.loaded === "preview") throw new Error("Missing catalog Course option.");
+
+    await writeFile(source, valid("fresh-id", "Fresh Course"));
+    await expect(selectLoadedCourse(cwd, catalogOption.loaded)).resolves.toEqual({ selectedCourseId: "fresh-id", sourcePath: await realpath(source) });
+    expect((await readCourseSettings(cwd)).settings).toEqual({ selectedCourseId: "fresh-id", sourcePath: await realpath(source) });
+
+    await writeFile(source, valid("preview-course", "Imposter Preview"));
+    await expect(selectLoadedCourse(cwd, catalogOption.loaded)).rejects.toThrow("reserved by Preview Course");
+    expect((await readCourseSettings(cwd)).settings).toEqual({ selectedCourseId: "fresh-id", sourcePath: await realpath(source) });
   });
 
   it("AC-CRS-008-02 AC-CRS-008-03 reconciles selected winners, duplicate exclusion, labels, replacement, and candidate permutations", async () => {
