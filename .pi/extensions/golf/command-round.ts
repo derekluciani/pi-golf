@@ -9,7 +9,7 @@ import { createRoundCourseSnapshot } from "./course-loader/snapshot.ts";
 import { captureSelectedCourseSnapshot, formatCourseLoadIssue, PREVIEW_COURSE_SOURCE, readStableCourseFile, terrainAtPoint } from "./course-loader/index.ts";
 import type { CourseHole, Point, RoundCourseSnapshot } from "./course-loader/types.ts";
 import { SystemMonotonicClock, type PlayableTerrain } from "./domain/index.ts";
-import { GameController, gameOptionsFromRecovered, newRoundState } from "./game/index.ts";
+import { GameController, gameOptionsFromRecovered, newRoundState, type GameWriter } from "./game/index.ts";
 import { appendRoundReplacement, appendRoundStart, reconstructActiveBranch, RoundMutationWriter, RoundStore, type ReconstructedRound } from "./persistence/index.ts";
 import { resolveShot } from "./simulation/index.ts";
 import { CameraController } from "./ui/index.ts";
@@ -76,17 +76,31 @@ function keyName(data: string): string | null {
   return null;
 }
 
-class GolfRoundComponent implements Component {
+export interface GolfRoundGame {
+  readonly state: { readonly kind: string };
+  readonly closed: boolean;
+  tick(): void;
+  key(key: string): void;
+  whenIdle(): Promise<void>;
+  roundScore(): number;
+  readonly introText: string;
+}
+
+export class GolfRoundComponent implements Component {
   #timer: ReturnType<typeof setInterval>;
   #closed = false;
 
   constructor(
-    private readonly game: GameController,
+    private readonly game: GolfRoundGame,
     private readonly tui: TUI,
     private readonly theme: Theme,
     private readonly done: () => void,
   ) {
-    this.#timer = setInterval(() => { this.game.tick(); this.tui.requestRender(); }, TICK_MILLISECONDS);
+    this.#timer = setInterval(() => {
+      this.game.tick();
+      if (this.game.closed) void this.closeAfterDurability();
+      this.tui.requestRender();
+    }, TICK_MILLISECONDS);
   }
 
   render(width: number): string[] {
@@ -121,13 +135,27 @@ class GolfRoundComponent implements Component {
   }
 }
 
+export function mirrorAcceptedMutations(pi: Pick<ExtensionAPI, "appendEntry">, writer: GameWriter, roundId: string): GameWriter {
+  const mirror = async (work: Promise<number>): Promise<number> => {
+    const revision = await work;
+    pi.appendEntry("pi-golf-round-v1", { roundId, revision });
+    return revision;
+  };
+  return {
+    commitShot: (shot, state) => mirror(writer.commitShot(shot, state)),
+    append: (entry) => mirror(writer.append(entry)),
+  };
+}
+
 async function buildGame(
+  pi: ExtensionAPI,
   store: RoundStore,
   sessionId: string,
   recovered: ReconstructedRound,
   snapshot: RoundCourseSnapshot,
 ): Promise<GameController> {
-  const writer = await RoundMutationWriter.forSession(store, sessionId, recovered.roundId, recovered.revision);
+  const durableWriter = await RoundMutationWriter.forSession(store, sessionId, recovered.roundId, recovered.revision);
+  const writer = mirrorAcceptedMutations(pi, durableWriter, recovered.roundId);
   const clock = new SystemMonotonicClock();
   let game: GameController | undefined = undefined;
   const hole = (): CourseHole => {
@@ -164,8 +192,8 @@ async function buildGame(
   return game;
 }
 
-async function openRound(ctx: ExtensionCommandContext, store: RoundStore, round: ReconstructedRound, snapshot: RoundCourseSnapshot): Promise<void> {
-  const game = await buildGame(store, ctx.sessionManager.getSessionId(), round, snapshot);
+async function openRound(pi: ExtensionAPI, ctx: ExtensionCommandContext, store: RoundStore, round: ReconstructedRound, snapshot: RoundCourseSnapshot): Promise<void> {
+  const game = await buildGame(pi, store, ctx.sessionManager.getSessionId(), round, snapshot);
   await openGolfOverlay(ctx, (tui, theme, _keybindings, done) => new GolfRoundComponent(game, tui, theme, () => done(undefined)));
 }
 
@@ -190,30 +218,33 @@ export async function runGolfRoundCommand(pi: ExtensionAPI, ctx: ExtensionComman
       if (!confirmed) return;
       const snapshot = await selectedSnapshot(ctx.cwd);
       const successorId = randomUUID();
+      // The branch mirror may have been interrupted after a durable mutation. The
+      // store is authoritative, so replacement always links its current revision.
+      const predecessor = await store.read(recovered.roundId);
       const successor = await appendRoundReplacement(store, {
-        predecessorRoundId: recovered.roundId,
-        predecessorRevision: recovered.revision,
+        predecessorRoundId: predecessor.roundId,
+        predecessorRevision: predecessor.revision,
         successorRoundId: successorId,
         successorSnapshot: snapshot,
         successorState: newRoundState(snapshot),
         branchId,
       });
-      pi.appendEntry("pi-golf-round-v1", { roundId: recovered.roundId, revision: recovered.revision + 1 });
-      await openRound(ctx, store, successor, snapshot);
+      pi.appendEntry("pi-golf-round-v1", { roundId: predecessor.roundId, revision: predecessor.revision + 1 });
+      await openRound(pi, ctx, store, successor, snapshot);
       return;
     }
     if (recovered === null || recovered.terminal || replace) {
       const snapshot = await selectedSnapshot(ctx.cwd);
       recovered = await startRound(store, snapshot, branchId);
       pi.appendEntry("pi-golf-round-v1", { roundId: recovered.roundId, revision: recovered.revision });
-      await openRound(ctx, store, recovered, snapshot);
+      await openRound(pi, ctx, store, recovered, snapshot);
       return;
     }
     const snapshot = await createRoundCourseSnapshot(async () => {
       const start = await store.startEntry(recovered.roundId);
       return start.payload.courseSnapshot;
     });
-    await openRound(ctx, store, recovered, snapshot);
+    await openRound(pi, ctx, store, recovered, snapshot);
   })();
   ACTIVE_COMMANDS.set(key, work);
   try { await work; } finally { if (ACTIVE_COMMANDS.get(key) === work) ACTIVE_COMMANDS.delete(key); }

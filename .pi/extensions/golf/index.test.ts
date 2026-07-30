@@ -2,7 +2,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { TUI } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 
 import { validateCourse } from "./course-loader/index.ts";
@@ -12,6 +13,8 @@ import {
   vectorForShotDirection,
 } from "./domain/index.ts";
 import registerGolfExtension from "./index.ts";
+import { GolfRoundComponent, mirrorAcceptedMutations } from "./command-round.ts";
+import type { GameWriter } from "./game/index.ts";
 import { GOLF_BRANCH_REFERENCE_TYPE, RoundStore, type GolfEntryV1 } from "./persistence/index.ts";
 
 async function readProjectFile(path: string): Promise<string> {
@@ -221,6 +224,29 @@ describe("V2-FND-001 project-local extension foundation", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it("AC-CMD-001-02 uses the current durable predecessor revision after an interrupted branch mirror", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-golf-command-current-revision-"));
+    try {
+      const registerCommand = vi.fn(); let reference: { roundId: string; revision: number } | undefined;
+      const appendEntry = vi.fn((_type: string, data: { roundId: string; revision: number }) => { reference = data; });
+      const confirm = vi.fn(async () => true);
+      registerGolfExtension({ registerCommand, appendEntry } as unknown as ExtensionAPI);
+      const handler = registerCommand.mock.calls[0]?.[1].handler as ((args: string, ctx: unknown) => Promise<void>);
+      const sessionManager = { getSessionId: () => "branch-a", getBranch: () => reference === undefined ? [] : [{ type: "custom", id: "golf", parentId: null, timestamp: "x", customType: GOLF_BRANCH_REFERENCE_TYPE, data: reference }] };
+      const ui = { notify: vi.fn(), confirm, custom: vi.fn(async () => undefined) };
+      await handler("", { mode: "tui", cwd: root, sessionManager, ui });
+      if (reference === undefined) throw new Error("Round start did not mirror its branch reference.");
+      const store = new RoundStore({ root: join(root, ".pi/golf/rounds") });
+      const predecessor = await store.read(reference.roundId);
+      await store.append({ entryVersion: 1, roundId: predecessor.roundId, revision: 1, kind: "checkpoint", payload: { state: predecessor.state, lifecycle: "aiming" } });
+      await handler("new", { mode: "tui", cwd: root, sessionManager, ui });
+      const replaced = await store.read(predecessor.roundId);
+      expect(replaced).toMatchObject({ revision: 2, replacement: expect.any(String), terminal: true });
+      expect(await store.findByBranch("branch-a")).toHaveLength(1);
+      expect(reference).toEqual({ roundId: predecessor.roundId, revision: 2 });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("AC-CMD-001-02 command-level confirmed reentry and interrupted delivery retain exactly one linked active successor", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-golf-command-new-retry-"));
     try {
@@ -247,6 +273,52 @@ describe("V2-FND-001 project-local extension foundation", () => {
       expect(appendEntry).toHaveBeenCalledTimes(2);
       expect(custom).toHaveBeenCalledTimes(3);
     } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("AC-CMD-001-01 mirrors each accepted Shot, checkpoint, and terminal transition", async () => {
+    let revision = 0;
+    const writer: GameWriter = {
+      commitShot: vi.fn(async () => ++revision),
+      append: vi.fn(async () => ++revision),
+    };
+    const appendEntry = vi.fn();
+    const mirrored = mirrorAcceptedMutations({ appendEntry }, writer, "mirror-round");
+    await mirrored.commitShot({} as never, commandState());
+    await mirrored.append({ kind: "checkpoint", payload: { state: commandState(), lifecycle: "aiming" } });
+    await mirrored.append({ kind: "round-terminal", payload: { status: "abandoned", state: commandState("abandoned") } });
+    expect(appendEntry.mock.calls).toEqual([
+      [GOLF_BRANCH_REFERENCE_TYPE, { roundId: "mirror-round", revision: 1 }],
+      [GOLF_BRANCH_REFERENCE_TYPE, { roundId: "mirror-round", revision: 2 }],
+      [GOLF_BRANCH_REFERENCE_TYPE, { roundId: "mirror-round", revision: 3 }],
+    ]);
+  });
+
+  it("AC-CMD-001-03 deferred Esc close waits for accepted durability and completes the overlay once", async () => {
+    vi.useFakeTimers();
+    try {
+      let accept!: () => void; let closed = false;
+      const accepted = new Promise<void>((resolve) => { accept = resolve; });
+      const done = vi.fn(); const requestRender = vi.fn();
+      const game = {
+        state: { kind: "aiming" },
+        get closed() { return closed; },
+        tick: vi.fn(),
+        key: vi.fn(() => { void accepted.then(() => { closed = true; }); }),
+        whenIdle: vi.fn(async () => accepted),
+        roundScore: () => 0,
+        introText: "Course — Hole 1 — Par 3",
+      };
+      const component = new GolfRoundComponent(game, { requestRender } as unknown as TUI, {} as Theme, done);
+      component.handleInput("\u001b");
+      await vi.advanceTimersByTimeAsync(50);
+      expect(done).not.toHaveBeenCalled();
+      accept(); await accepted;
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(done).toHaveBeenCalledTimes(1);
+      expect(game.whenIdle).toHaveBeenCalledTimes(1);
+      expect(requestRender).toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
   });
 
   it("AC-CMD-001-03 returns the interactive-TUI-required response outside TUI", async () => {
