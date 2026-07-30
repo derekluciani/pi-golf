@@ -21,8 +21,14 @@ export {
   terrainAtCell,
 } from "./rasterizer.ts";
 export { parseCourseJson } from "./raw-parser.ts";
+export { discoverCourses, formatCourseLoadIssue, loadCourseFile, loadSelectableCourseFile, readStableCourseFile, MAX_DISCOVERED_CANDIDATES, MAX_DISCOVERY_DEPTH, type CourseDiscoveryResult, type CourseFileLoadResult, type CourseLoadIssue, type CourseLoadIssueCode, type LoadedCourseFile } from "./loading.ts";
+export { PREVIEW_COURSE_CATALOG, reconcileCourseCatalog, type CourseCatalog, type CourseCatalogInput, type CourseCatalogOption, type CourseCatalogPreview, type CourseCatalogWarning } from "./catalog.ts";
+export { getCourseProjectPaths, isReservedBuiltInCourseId, PREVIEW_COURSE_ID, PREVIEW_COURSE_SETTINGS, PREVIEW_COURSE_SOURCE, readCourseSettings, writeCourseSettings, type CourseSettings, type CourseSettingsIssue, type CourseSettingsIssueCode, type CourseSettingsReadResult, type CourseSettingsWriteHooks } from "./settings.ts";
+export { captureSelectedCourseSnapshot, selectCourseFromPath, selectLoadedCourse, type CourseSelectionWarning, type CourseSelectionWarningCode, type ExplicitCourseSelectionResult, type SelectedCourseSnapshot } from "./selection.ts";
+export { buildCourseSettingsModel, COURSE_SETTING_ID, COURSE_SETTING_LABEL, createCourseSettingsComponent, GOLF_SETTINGS_TITLE, showCourseSettings, type CourseSettingOption, type CourseSettingsComponent, type CourseSettingsComponentOptions, type CourseSettingsModel } from "./ui.ts";
 export { canonicalizeCourseWarnings } from "./warnings.ts";
 export { createRoundCourseSnapshot } from "./snapshot.ts";
+export { playSelectedMinimalCourseAndReturnToPreview, type MinimalCoursePlayResult } from "./minimal-course-play.ts";
 export { parseCourse, terrainAtPoint, validateCourse, validateCourseStructure } from "./validation.ts";
 export {
   OUT_OF_BOUNDS,

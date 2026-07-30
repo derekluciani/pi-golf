@@ -31,6 +31,20 @@ describe("V2-FND-001 project-local extension foundation", () => {
     );
   });
 
+  it("AC-CRS-010-04 AC-CMD-003-03 routes explicit minimal selection through the isolated Pi proof adapter and returns Preview", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-golf-minimal-proof-"));
+    try {
+      const registerCommand = vi.fn(); const notify = vi.fn();
+      registerGolfExtension({ registerCommand } as unknown as ExtensionAPI);
+      const handler = registerCommand.mock.calls[0]?.[1].handler as ((args: string, ctx: unknown) => Promise<void>) | undefined;
+      if (handler === undefined) throw new Error("Golf handler was not registered.");
+      const ctx = { cwd: root, ui: { notify }, sessionManager: { getSessionId: () => "branch-a", getBranch: () => [] } };
+      await handler(`course ${new URL("../../../docs/examples/minimal-course.json", import.meta.url).pathname}`, ctx);
+      await handler("proof-minimal-course", ctx);
+      expect(notify).toHaveBeenLastCalledWith("Minimal Course proof play completed (200 raster cells); returned to Preview Course.", "info");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("AC-PER-001-03 / AC-PER-001-04 mirrors durable first-action start to the real Pi custom branch-entry shape", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-golf-branch-seam-"));
     try {
