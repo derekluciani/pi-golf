@@ -53,7 +53,7 @@ describe("V2-FND-001 project-local extension foundation", () => {
       registerGolfExtension({ registerCommand, appendEntry } as unknown as ExtensionAPI);
       const handler = registerCommand.mock.calls[0]?.[1].handler as ((args: string, ctx: unknown) => Promise<void>) | undefined;
       if (handler === undefined) throw new Error("Golf handler was not registered.");
-      await handler("", { cwd: root, sessionManager: { getSessionId: () => "branch-a", getBranch: () => [] }, ui: { notify: vi.fn() } });
+      await handler("", { mode: "tui", cwd: root, sessionManager: { getSessionId: () => "branch-a", getBranch: () => [] }, ui: { notify: vi.fn(), custom: vi.fn(async () => undefined) } });
       expect(appendEntry).toHaveBeenCalledWith("pi-golf-round-v1", expect.objectContaining({ roundId: expect.any(String), revision: 0 }));
     } finally { await rm(root, { recursive: true, force: true }); }
   });
@@ -133,5 +133,57 @@ describe("V2-FND-001 project-local extension foundation", () => {
       expect(source).not.toContain("@earendil-works/pi-tui");
       expect(source).not.toContain("ctx.ui.custom");
     }
+  });
+
+  it("AC-CMD-001-01 starts the selected Course once, resumes its active Round, and rejects overlap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-golf-command-round-"));
+    try {
+      const registerCommand = vi.fn(); let reference: { roundId: string; revision: number } | undefined;
+      const appendEntry = vi.fn((_type: string, data: { roundId: string; revision: number }) => { reference = data; }); const notify = vi.fn();
+      let release!: () => void;
+      const open = new Promise<void>((resolve) => { release = resolve; });
+      const custom = vi.fn(async () => open);
+      registerGolfExtension({ registerCommand, appendEntry } as unknown as ExtensionAPI);
+      const handler = registerCommand.mock.calls[0]?.[1].handler as ((args: string, ctx: unknown) => Promise<void>);
+      const ctx = { mode: "tui", cwd: root, sessionManager: { getSessionId: () => "branch-a", getBranch: () => reference === undefined ? [] : [{ type: "custom", id: "golf", parentId: null, timestamp: "x", customType: "pi-golf-round-v1", data: reference }] }, ui: { notify, custom } };
+      const first = handler("", ctx);
+      await vi.waitFor(() => expect(custom).toHaveBeenCalledTimes(1));
+      const overlapping = handler("", ctx);
+      expect(custom).toHaveBeenCalledTimes(1);
+      release(); await Promise.all([first, overlapping]);
+      await handler("", { ...ctx, ui: { ...ctx.ui, custom: vi.fn(async () => undefined) } });
+      expect(appendEntry).toHaveBeenCalledTimes(1);
+      expect(notify).not.toHaveBeenCalledWith(expect.stringContaining("Could not open Pi Golf"), "error");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("AC-CMD-001-02 confirms active replacement and records one linked successor", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-golf-command-new-"));
+    try {
+      const registerCommand = vi.fn(); let reference: { roundId: string; revision: number } | undefined;
+      const appendEntry = vi.fn((_type: string, data: { roundId: string; revision: number }) => { reference = data; }); const confirm = vi.fn(async () => false);
+      registerGolfExtension({ registerCommand, appendEntry } as unknown as ExtensionAPI);
+      const handler = registerCommand.mock.calls[0]?.[1].handler as ((args: string, ctx: unknown) => Promise<void>);
+      const sessionManager = { getSessionId: () => "branch-a", getBranch: () => reference === undefined ? [] : [{ type: "custom", id: "golf", parentId: null, timestamp: "x", customType: "pi-golf-round-v1", data: reference }] };
+      const ui = { notify: vi.fn(), confirm, custom: vi.fn(async () => undefined) };
+      await handler("", { mode: "tui", cwd: root, sessionManager, ui });
+      await handler("new", { mode: "tui", cwd: root, sessionManager, ui });
+      expect(confirm).toHaveBeenCalledWith("Start a new Round?", "Replace the active Round?");
+      expect(appendEntry).toHaveBeenCalledTimes(1);
+      confirm.mockResolvedValueOnce(true);
+      await handler("new", { mode: "tui", cwd: root, sessionManager, ui });
+      expect(appendEntry).toHaveBeenCalledTimes(2);
+      const { RoundStore } = await import("./persistence/index.ts");
+      const rounds = await new RoundStore({ root: join(root, ".pi/golf/rounds") }).findByBranch("branch-a");
+      expect(rounds).toHaveLength(1);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("AC-CMD-001-03 returns the interactive-TUI-required response outside TUI", async () => {
+    const registerCommand = vi.fn(); const notify = vi.fn();
+    registerGolfExtension({ registerCommand } as unknown as ExtensionAPI);
+    const handler = registerCommand.mock.calls[0]?.[1].handler as ((args: string, ctx: unknown) => Promise<void>);
+    await handler("", { mode: "print", cwd: "/unused", ui: { notify }, sessionManager: { getSessionId: () => "branch-a", getBranch: () => [] } });
+    expect(notify).toHaveBeenCalledWith("Pi Golf requires interactive TUI mode.", "warning");
   });
 });
