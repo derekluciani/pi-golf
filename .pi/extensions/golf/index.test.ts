@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 
 import { validateCourse } from "./course-loader/index.ts";
@@ -14,7 +14,7 @@ import {
 } from "./domain/index.ts";
 import registerGolfExtension from "./index.ts";
 import { GolfRoundComponent, mirrorAcceptedMutations } from "./command-round.ts";
-import type { GameWriter } from "./game/index.ts";
+import { type GameController, type GameWriter } from "./game/index.ts";
 import { GOLF_BRANCH_REFERENCE_TYPE, RoundStore, type GolfEntryV1 } from "./persistence/index.ts";
 
 async function readProjectFile(path: string): Promise<string> {
@@ -308,7 +308,9 @@ describe("V2-FND-001 project-local extension foundation", () => {
         roundScore: () => 0,
         introText: "Course — Hole 1 — Par 3",
       };
-      const component = new GolfRoundComponent(game, { requestRender } as unknown as TUI, {} as Theme, done);
+      const parsedCourse = validateCourse(JSON.parse(COMMAND_COURSE));
+      if (!parsedCourse.ok) throw new Error("Render fixture Course must be valid.");
+      const component = new GolfRoundComponent(game as unknown as GameController, parsedCourse.value, { requestRender } as unknown as TUI, {} as Theme, done);
       component.handleInput("\u001b");
       await vi.advanceTimersByTimeAsync(50);
       expect(done).not.toHaveBeenCalled();
@@ -319,6 +321,91 @@ describe("V2-FND-001 project-local extension foundation", () => {
       expect(game.whenIdle).toHaveBeenCalledTimes(1);
       expect(requestRender).toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
+  });
+
+  it("AC-CMD-001-03 composes the authoritative T08 terrain, HUD, meter, and playback frame into the playable Round overlay", () => {
+    const parsedCourse = validateCourse(JSON.parse(COMMAND_COURSE));
+    if (!parsedCourse.ok) throw new Error("Render fixture Course must be valid.");
+    const game = {
+      state: { kind: "metering" }, closed: false, round: commandState(), hudVisible: true,
+      camera: { position: () => ({ x: 1, y: 1 }) }, playbackFrame: { position: { x: 1, y: 1 }, speed: 2.5, complete: false },
+      meterBlocks: 3, introText: "Command Course — Hole 1 — Par 3", confirmationText: "Abandon the active Round?",
+      hudScore: { hole: 1, par: 3, playedStrokes: 0, penaltyStrokes: 0, holeScore: 0, roundScore: 0 },
+      tick: vi.fn(), key: vi.fn(), resize: vi.fn(), whenIdle: vi.fn(async () => undefined),
+      holeSummary: () => null, roundSummary: () => null,
+    };
+    const component = new GolfRoundComponent(game as unknown as GameController, parsedCourse.value, { terminal: { rows: 20 }, requestRender: vi.fn() } as unknown as TUI, { fg: (_name: string, text: string) => text } as unknown as Theme, vi.fn());
+    try {
+      const lines = component.render(61);
+      expect(lines).toHaveLength(20);
+      expect(lines.join("\n")).toContain("Hole Score 0");
+      expect(lines.join("\n")).toContain("Club driver");
+      expect(lines.join("\n")).toContain("\u001b[38;2;237;135;150m███\u001b[0m");
+      expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);
+    } finally { component.dispose(); }
+  });
+
+  it("AC-CMD-001-03 composes T08 HUD-safe marker placement and deterministic off-canvas arrows at panel boundaries", () => {
+    for (const [terrain, goal] of [["green", "○"], ["fairway", "⚑"]] as const) {
+      const parsedCourse = validateCourse({
+        schemaVersion: 1, id: `hud-safe-${terrain}`, name: "HUD Safe Course",
+        holes: [{
+          id: "hud-safe-hole", number: 1, par: 3,
+          boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 0, y: 20 }] },
+          tee: { x: 1, y: 1 }, cup: { x: 9, y: 7 },
+          regions: [
+            { terrain, shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 0, y: 20 }] } },
+            ...(terrain === "fairway" ? [{ terrain: "green" as const, shape: { type: "polygon" as const, points: [{ x: 8, y: 6 }, { x: 10, y: 6 }, { x: 10, y: 8 }, { x: 8, y: 8 }] } }] : []),
+          ],
+        }],
+      });
+      if (!parsedCourse.ok) throw new Error("HUD-safe Course fixture must be valid.");
+      const game = {
+        state: { kind: "aiming" }, closed: false, round: commandState(), hudVisible: true,
+        camera: { position: () => ({ x: 15, y: 10 }) }, playbackFrame: null, meterBlocks: 0,
+        introText: "", confirmationText: "", hudScore: { hole: 1, par: 3, playedStrokes: 0, penaltyStrokes: 0, holeScore: 0, roundScore: 0 },
+        tick: vi.fn(), key: vi.fn(), resize: vi.fn(), whenIdle: vi.fn(async () => undefined), holeSummary: () => null, roundSummary: () => null,
+      };
+      const component = new GolfRoundComponent(game as unknown as GameController, parsedCourse.value, { terminal: { rows: 20 }, requestRender: vi.fn() } as unknown as TUI, { fg: (_name: string, text: string) => text } as Theme, vi.fn());
+      try {
+        const canvas = component.render(60).join("\n");
+        // Ball begins below the top-left panel, goal remains below it, and the
+        // off-canvas Target becomes a right arrow below the top-right panel.
+        expect(canvas).toContain("●");
+        expect(canvas).toContain(goal);
+        expect(canvas).toContain("·");
+        expect(canvas).toContain("→");
+      } finally { component.dispose(); }
+    }
+  });
+
+  it("AC-CMD-001-03 keeps the Flag/Cup selected at Shot origin through playback", () => {
+    for (const [originTerrain, expectedGoal] of [["fairway", "⚑"], ["green", "○"]] as const) {
+      const parsedCourse = validateCourse({
+        schemaVersion: 1, id: `playback-origin-${originTerrain}`, name: "Playback Origin Course",
+        holes: [{
+          id: "playback-origin-hole", number: 1, par: 3,
+          boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 0, y: 20 }] },
+          tee: { x: 1, y: 1 }, cup: { x: 9, y: 7 },
+          regions: [
+            { terrain: originTerrain, shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 0, y: 20 }] } },
+            ...(originTerrain === "fairway" ? [{ terrain: "green" as const, shape: { type: "polygon" as const, points: [{ x: 8, y: 6 }, { x: 10, y: 6 }, { x: 10, y: 8 }, { x: 8, y: 8 }] } }] : []),
+          ],
+        }],
+      });
+      if (!parsedCourse.ok) throw new Error("Playback origin Course fixture must be valid.");
+      const game = {
+        state: { kind: "playback", shot: { preShotLie: { x: 1, y: 1 } }, beganAt: 0, queued: null }, closed: false,
+        round: { ...commandState(), lie: { x: 9, y: 7 } }, hudVisible: false,
+        camera: { position: () => ({ x: 15, y: 10 }) }, playbackFrame: { position: { x: 5, y: 7 }, speed: 0, complete: false }, meterBlocks: 0,
+        introText: "", confirmationText: "", hudScore: { hole: 1, par: 3, playedStrokes: 1, penaltyStrokes: 0, holeScore: 1, roundScore: 1 },
+        tick: vi.fn(), key: vi.fn(), resize: vi.fn(), whenIdle: vi.fn(async () => undefined), holeSummary: () => null, roundSummary: () => null,
+      };
+      const component = new GolfRoundComponent(game as unknown as GameController, parsedCourse.value, { terminal: { rows: 20 }, requestRender: vi.fn() } as unknown as TUI, {} as Theme, vi.fn());
+      try {
+        expect(component.render(60).join("\n")).toContain(expectedGoal);
+      } finally { component.dispose(); }
+    }
   });
 
   it("AC-CMD-001-03 returns the interactive-TUI-required response outside TUI", async () => {
