@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PersistedRoundState } from "../domain/index.ts";
 import { parseCourseJson } from "../course-loader/raw-parser.ts";
+import type { DurableResolvedShot } from "../simulation/outcome.ts";
 import { appendRoundReplacement, GOLF_ENTRY_MIGRATIONS, GOLF_BRANCH_REFERENCE_TYPE, RoundMutationWriter, RoundStore, parseGolfEntry, reconstructActiveBranch, reconstructRound, type BranchEntryLike, type GolfEntryV1 } from "./index.ts";
 
 const snapshot = JSON.stringify({ schemaVersion: 1, id: "tiny", name: "Tiny", holes: [{ id: "tiny-hole", number: 1, par: 3, boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] }, tee: { x: 1, y: 1 }, cup: { x: 2, y: 2 }, regions: [{ terrain: "green", shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] } }] }] });
@@ -19,6 +20,7 @@ const firstScore = { hole: { id: "one" as never, number: 1 as never, courseIndex
 const secondScore = { hole: { id: "two" as never, number: 2 as never, courseIndex: 1 as never }, playedStrokes: 1, penaltyStrokes: 0, completed: true };
 const multiStart = (): GolfEntryV1 => ({ entryVersion: 1, roundId: "multi-round", revision: 0, kind: "round-start", payload: { courseSnapshot: multiHoleSnapshot, state: multiState(0, { x: 1, y: 1 }, []), branchId: "multi-session" } });
 const multiCupShot = (revision: number, shotId: string, preShotLie: { x: number; y: number }, cup: { x: number; y: number }, stateAfterCup: PersistedRoundState): GolfEntryV1 => ({ entryVersion: 1, roundId: "multi-round", revision, kind: "shot", payload: { state: stateAfterCup, shot: { shotId, preShotLie, inputs: { club: "driver", directionIndex: 0, power: 1 }, landingPosition: cup, finalPosition: cup, terminal: "cup", resultingSpeed: 0, elapsed: 1, resultingRound: { lie: cup, playedStrokes: 1, penaltyStrokes: 0, selectedClub: "driver", directionIndex: 0 } } } });
+type DurableShotFixture = DurableResolvedShot;
 const branch = (refs: readonly { roundId: string; revision: number }[]): BranchEntryLike[] => [{ type: "session", id: "root", parentId: null, timestamp: "2026-01-01T00:00:00Z" }, ...refs.map((ref, i) => ({ type: "custom", id: `golf-${i}`, parentId: i === 0 ? "root" : `golf-${i - 1}`, timestamp: "2026-01-01T00:00:00Z", customType: GOLF_BRANCH_REFERENCE_TYPE, data: ref }))];
 async function fixture(): Promise<{ root: string; store: RoundStore }> { const root = await mkdtemp(join(tmpdir(), "pi-golf-round-")); return { root, store: new RoundStore({ root: join(root, ".pi/golf/rounds") }) }; }
 
@@ -29,6 +31,23 @@ describe("V2-PER durable Round store", () => {
   it("AC-PER-001-05 / AC-PER-003-04 truncates only an unterminated tail before append and fails closed for malformed committed data", async () => { const { root, store } = await fixture(); try { await store.append(start()); await writeFile(store.pathFor("round-a"), `${JSON.stringify(start())}\n{`); await expect(store.read("round-a")).resolves.toMatchObject({ revision: 0 }); await store.append(shot()); await expect(store.read("round-a")).resolves.toMatchObject({ revision: 1, state: { lie: { x: 2, y: 1 } } }); expect((await readFile(store.pathFor("round-a"), "utf8")).trim().split("\n")).toHaveLength(2); await writeFile(store.pathFor("round-a"), `${JSON.stringify(start())}\n{bad}\n`); await expect(store.append(shot())).rejects.toThrow("Malformed committed"); await expect(store.read("round-a")).rejects.toThrow("Malformed committed"); } finally { await rm(root, { recursive: true }); } });
   it("AC-PER-002-01 strictly round-trips every envelope kind", () => { const replacement: GolfEntryV1 = { entryVersion: 1, roundId: "round-a", revision: 1, kind: "round-replacement", payload: { successorRoundId: "round-b", successorStartRevision: 0, successorStart: start("round-b").payload as never } }; for (const entry of [start(), shot(), { entryVersion: 1, roundId: "round-a", revision: 1, kind: "checkpoint", payload: { state: state(), lifecycle: "aiming" } }, { entryVersion: 1, roundId: "round-a", revision: 1, kind: "round-terminal", payload: { status: "complete", state: state("complete") } }, replacement]) expect(parseGolfEntry(JSON.parse(JSON.stringify(entry)))).toEqual(entry); });
   it("AC-PER-002-02 / AC-PER-002-04 reject incoherent semantic chains without older fallback", () => { expect(() => reconstructRound([start(), { ...shot(), revision: 2 }])).toThrow(); expect(() => reconstructRound([start(), { ...shot(), payload: { ...(shot().payload as object), state: state() } }])).toThrow(); expect(() => reconstructRound([{ ...start(), entryVersion: 2 }])).toThrow(); });
+  it("AC-PER-002-02 / AC-PER-003-02 accepts a directly committed Shot after legal transient Club/direction changes and fails closed on mismatched results", async () => {
+    const { root, store } = await fixture();
+    try {
+      await store.append(start());
+      const changedState = { ...state("active", { x: 2, y: 1 }), selectedClub: "putter" as const, shotDirectionIndex: 3 as PersistedRoundState["shotDirectionIndex"] };
+      const changedShot = {
+        ...(shot().payload as { shot: DurableShotFixture }).shot,
+        inputs: { club: "putter" as const, directionIndex: 3 as PersistedRoundState["shotDirectionIndex"], power: 1 },
+        resultingRound: { lie: { x: 2, y: 1 }, playedStrokes: 1, penaltyStrokes: 0, selectedClub: "putter" as const, directionIndex: 3 as PersistedRoundState["shotDirectionIndex"] },
+      };
+      const writer = await RoundMutationWriter.forSession(store, "changed-aim-session", "round-a", 0);
+      await expect(writer.commitShot(changedShot, changedState)).resolves.toBe(1);
+      await expect(store.read("round-a")).resolves.toMatchObject({ revision: 1, state: { selectedClub: "putter", shotDirectionIndex: 3 } });
+      const mismatch = { ...changedShot, inputs: { ...changedShot.inputs, directionIndex: 4 as PersistedRoundState["shotDirectionIndex"] } };
+      expect(() => reconstructRound([start(), { ...shot(), payload: { shot: mismatch, state: changedState } }])).toThrow("Incoherent Shot transition");
+    } finally { await rm(root, { recursive: true }); }
+  });
   it("AC-PER-002-01 / AC-PER-004-02 / AC-PER-004-03 enforce immutable Course, scoring, cup, and terminal transitions", () => {
     const badInput = { ...shot(), payload: { ...(shot().payload as { shot: object; state: PersistedRoundState }), shot: { ...(shot().payload as { shot: { inputs: object } }).shot, inputs: { club: "putter", directionIndex: 0, power: 1 } } } };
     const badScore = { ...shot(), payload: { ...(shot().payload as { shot: object; state: PersistedRoundState }), state: { ...state("active", { x: 2, y: 1 }), holeScores: [{ hole: { id: "tiny-hole", number: 1, courseIndex: 0 }, playedStrokes: 1, penaltyStrokes: 0, completed: true }] } } };
