@@ -9,7 +9,8 @@
     "./domain": "./.pi/extensions/golf/domain/index.ts",
     "./course-loader": "./.pi/extensions/golf/course-loader/index.ts",
     "./courses": "./.pi/extensions/golf/courses/index.ts",
-    "./ui": "./.pi/extensions/golf/ui/index.ts"
+    "./ui": "./.pi/extensions/golf/ui/index.ts",
+    "./game": "./.pi/extensions/golf/game/index.ts"
   },
   "files": [
     ".pi/extensions/golf/index.ts",
@@ -40,7 +41,8 @@
     ".pi/extensions/golf/courses/index.ts",
     ".pi/extensions/golf/courses/preview-course.json",
     "docs/course-format.md",
-    "docs/examples/minimal-course.json"
+    "docs/examples/minimal-course.json",
+    ".pi/extensions/golf/game/**"
   ],
   "engines": {
     "node": ">=22.19.0"

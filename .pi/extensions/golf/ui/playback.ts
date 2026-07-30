@@ -8,6 +8,7 @@ export interface PlaybackFrame { readonly position: Point; readonly speed: numbe
 /** Interpolates immutable resolved keyframes. It owns no Round or persistence reference. */
 export class ResolvedShotPlayback {
   #startedAt: number | undefined;
+  #frozenAt: number | undefined;
   constructor(private readonly clock: MonotonicClock, private readonly resolved: ResolvedPlayback) {
     if (resolved.keyframes.length === 0) throw new RangeError("Playback requires at least one keyframe.");
     for (let index = 1; index < resolved.keyframes.length; index++) {
@@ -17,9 +18,13 @@ export class ResolvedShotPlayback {
     }
   }
   start(): void { this.#startedAt = this.clock.now(); }
+  freezeForResize(): void { if (this.#frozenAt === undefined) this.#frozenAt = this.clock.now(); }
+  resumeFromResize(): void {
+    if (this.#frozenAt !== undefined && this.#startedAt !== undefined) { this.#startedAt += this.clock.now() - this.#frozenAt; this.#frozenAt = undefined; }
+  }
   frame(): PlaybackFrame {
     if (this.#startedAt === undefined) throw new Error("Playback has not started.");
-    const elapsed = Math.max(0, this.clock.now() - this.#startedAt);
+    const elapsed = Math.max(0, (this.#frozenAt ?? this.clock.now()) - this.#startedAt);
     const last = this.resolved.keyframes.at(-1);
     if (last === undefined) throw new Error("Playback keyframe lookup failed.");
     if (elapsed >= last.atMilliseconds) return { position: { ...last.position }, speed: last.speed, complete: true, ...this.notice() };

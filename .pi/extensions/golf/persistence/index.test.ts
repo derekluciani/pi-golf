@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { PersistedRoundState } from "../domain/index.ts";
+import { parseCourseJson } from "../course-loader/raw-parser.ts";
 import { appendRoundReplacement, GOLF_ENTRY_MIGRATIONS, GOLF_BRANCH_REFERENCE_TYPE, RoundMutationWriter, RoundStore, parseGolfEntry, reconstructActiveBranch, reconstructRound, type BranchEntryLike, type GolfEntryV1 } from "./index.ts";
 
 const snapshot = JSON.stringify({ schemaVersion: 1, id: "tiny", name: "Tiny", holes: [{ id: "tiny-hole", number: 1, par: 3, boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] }, tee: { x: 1, y: 1 }, cup: { x: 2, y: 2 }, regions: [{ terrain: "green", shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] } }] }] });
@@ -137,8 +138,8 @@ describe("V2-PER durable Round store", () => {
       const interrupted = new RoundStore({ root: rootPath, afterWrite: (at) => { if (at === boundary && ++boundaryCalls === (boundary === "directory-sync" ? 1 : 2)) throw new Error(`interrupt-successor-${boundary}`); } });
       const args = { predecessorRoundId: "round-a", predecessorRevision: 0, successorRoundId: "round-b", successorSnapshot: { serializedCourse: snapshot } as never, successorState: state(), branchId: "session-a" };
       if (boundary === "open") await expect(appendRoundReplacement(interrupted, args)).rejects.toThrow(`interrupt-successor-${boundary}`);
-      else await expect(appendRoundReplacement(interrupted, args)).resolves.toBeUndefined();
-      await expect(appendRoundReplacement(interrupted, args)).resolves.toBeUndefined();
+      else await expect(appendRoundReplacement(interrupted, args)).resolves.toMatchObject({ roundId: "round-b", revision: 0, terminal: false });
+      await expect(appendRoundReplacement(interrupted, args)).resolves.toMatchObject({ roundId: "round-b", revision: 0, terminal: false });
       const recovered = new RoundStore({ root: rootPath });
       await expect(reconstructActiveBranch(recovered, branch([{ roundId: "round-a", revision: 1 }]), "session-a")).resolves.toMatchObject({ roundId: "round-b", revision: 0, terminal: false });
       expect((await readFile(recovered.pathFor("round-a"), "utf8")).trim().split("\n")).toHaveLength(2);
@@ -153,6 +154,21 @@ describe("V2-PER durable Round store", () => {
     expect(canonical.map((entries) => reconstructRound(entries).lifecycle)).toEqual(["aiming", "hole-summary", "round-summary"]);
     for (const entries of canonical) expect(Object.keys(reconstructRound(entries).state).sort()).toEqual(["courseId", "currentHoleIndex", "holeScores", "kind", "lie", "selectedClub", "shotDirectionIndex", "status"]);
     expect(() => parseGolfEntry({ ...start(), payload: { ...start().payload as object, intro: true } })).toThrow("Invalid Golf entry");
+  });
+  it("AC-GME-002-02 AC-UI-004-03 persists actual Preview score fields and never recovers a terminal Round as active", async () => {
+    const { root, store } = await fixture();
+    try {
+      const previewBytes = await readFile(new URL("../courses/preview-course.json", import.meta.url), "utf8"); const parsed = parseCourseJson(previewBytes);
+      if (!parsed.ok) throw new Error("Preview fixture must be valid."); const preview = parsed.value; const first = preview.holes[0]; if (first === undefined) throw new Error("Preview needs Hole 1.");
+      const initialPreview = { kind: "persisted-round", courseId: preview.id, currentHoleIndex: 0, lie: first.tee, selectedClub: "driver", shotDirectionIndex: 0, holeScores: [], status: "active" } as unknown as PersistedRoundState;
+      await store.append({ entryVersion: 1, roundId: "preview-round", revision: 0, kind: "round-start", payload: { courseSnapshot: previewBytes, state: initialPreview, branchId: "preview-session" } });
+      const completed = { ...initialPreview, lie: first.cup, holeScores: [{ hole: { id: first.id, number: first.number, courseIndex: 0 }, playedStrokes: 1, penaltyStrokes: 0, completed: true }] } as unknown as PersistedRoundState;
+      await store.append({ entryVersion: 1, roundId: "preview-round", revision: 1, kind: "shot", payload: { state: completed, shot: { shotId: "preview-cup", preShotLie: first.tee, inputs: { club: "driver", directionIndex: 0, power: 1 }, landingPosition: first.cup, finalPosition: first.cup, terminal: "cup", resultingSpeed: 0, elapsed: 1, resultingRound: { lie: first.cup, playedStrokes: 1, penaltyStrokes: 0, selectedClub: "driver", directionIndex: 0 } } } });
+      const abandoned = { ...completed, status: "abandoned" } as unknown as PersistedRoundState;
+      await store.append({ entryVersion: 1, roundId: "preview-round", revision: 2, kind: "round-terminal", payload: { status: "abandoned", state: abandoned } });
+      await expect(store.read("preview-round")).resolves.toMatchObject({ terminal: true, lifecycle: "round-summary", state: { status: "abandoned", holeScores: [{ playedStrokes: 1, penaltyStrokes: 0 }] } });
+      await expect(store.findByBranch("preview-session")).resolves.toEqual([]);
+    } finally { await rm(root, { recursive: true }); }
   });
   it("AC-PER-005-04 newest invalid Round fails visibly and closed", async () => { const { root, store } = await fixture(); try { await store.append(start()); await writeFile(store.pathFor("round-a"), `${JSON.stringify(start())}\n{bad}\n`); await expect(reconstructActiveBranch(store, [], "session-a")).rejects.toThrow(); } finally { await rm(root, { recursive: true }); } });
 });

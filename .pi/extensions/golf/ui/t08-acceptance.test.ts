@@ -67,6 +67,11 @@ describe("V2-T08 responsive viewport, camera, and playback", () => {
     const playback = new ResolvedShotPlayback(clock, resolved); playback.start(); const frame = playback.frame(); const keyframe = resolved.keyframes[0]; if (keyframe === undefined) throw new Error("fixture keyframe missing"); expect(frame.position).toEqual({ x: 1, y: 1 }); expect(frame.position).not.toBe(keyframe.position);
   });
 
+  it("AC-UI-003-02 freezes concrete ResolvedShotPlayback active time during resize", () => {
+    const clock = new ManualMonotonicClock(); const playback = new ResolvedShotPlayback(clock, { shotId: "freeze", keyframes: [{ atMilliseconds: 0, position: { x: 0, y: 0 }, speed: 1 }, { atMilliseconds: 100, position: { x: 1, y: 0 }, speed: 0 }], terminal: "rest" });
+    playback.start(); clock.advanceBy(50); playback.freezeForResize(); clock.advanceBy(10_000); expect(playback.frame().complete).toBe(false); playback.resumeFromResize(); clock.advanceBy(49); expect(playback.frame().complete).toBe(false); clock.advanceBy(1); expect(playback.frame().complete).toBe(true);
+  });
+
   it("AC-REN-006-03 delays completion and hazard text until their terminal playback frame", () => {
     for (const [terminal, notice] of [["cup", "Hole complete"], ["water", "Water hazard"], ["out-of-bounds", "Out of Bounds"]] as const) {
       const clock = new ManualMonotonicClock(); const playback = new ResolvedShotPlayback(clock, { shotId: terminal, keyframes: [{ atMilliseconds: 0, position: { x: 0, y: 0 }, speed: 1 }, { atMilliseconds: 100, position: { x: 1, y: 1 }, speed: 0 }], terminal }); playback.start(); clock.advanceBy(99); expect(playback.frame().notice).toBeUndefined(); clock.advanceBy(1); expect(playback.frame().notice).toBe(notice);
