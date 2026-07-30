@@ -8,7 +8,7 @@ import { parseCourseJson } from "../course-loader/raw-parser.ts";
 import type { Course } from "../course-loader/types.ts";
 import { resolveShot, type ResolvedShot } from "../simulation/outcome.ts";
 import { OUT_OF_BOUNDS } from "../course-loader/index.ts";
-import { CameraController } from "../ui/index.ts";
+import { CameraController, ResolvedShotPlayback } from "../ui/index.ts";
 import { appendRoundStart, RoundMutationWriter, RoundStore } from "../persistence/index.ts";
 import { GAME_BASE_STATES, METER_INPUT_CONTRACT, GameController, gameOptionsFromRecovered, meterBlocksAt, newRoundState, renderPowerMeter, type GameWriter } from "./index.ts";
 
@@ -42,6 +42,20 @@ async function durableFixture(): Promise<{ root: string; store: RoundStore; snap
 describe("V2-T10 FSM and game component", () => {
   it("AC-UI-001-01 enumerates exactly the nine base states and resize-paused wrapper", () => { expect(GAME_BASE_STATES).toEqual(["intro", "aiming", "metering", "committing", "playback", "penalty-notice", "hole-summary", "round-summary", "confirm-abandon"]); });
   it("AC-GME-001-01 starts Preview Hole 1 immediately with Driver and quantized Cup direction", () => { const { game } = makeGame(); expect(game.round.selectedClub).toBe("driver"); expect(game.round.shotDirectionIndex).toBe(0); expect(game.introText).toBe("Preview Course — Hole 1 — Par 4"); });
+  it("AC-REN-005-01 AC-REN-006-01 exposes the authoritative camera, playback, and current Ball frame", async () => {
+    const clock = new ManualMonotonicClock(); const writer = new Writer();
+    const camera = new CameraController(clock, initial.lie, course.holes[0]?.cup ?? initial.lie);
+    const resolved = { ...shot(), keyframes: [{ elapsed: 0, position: { x: 0, y: 0 }, speed: 1 }, { elapsed: .1, position: { x: 1, y: 0 }, speed: 0 }] };
+    const game = new GameController({ course, state: initial, writer, clock, shotId: () => "shot-1", resolve: () => resolved, presentation: { camera, target: () => course.holes[0]?.cup ?? initial.lie } });
+    expect(game.camera).toBe(camera); expect(game.playback).toBeNull(); expect(game.playbackFrame).toBeNull();
+    clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("Enter", clock.now() + 50); await game.whenIdle();
+    const playback = game.playback;
+    expect(playback).toBeInstanceOf(ResolvedShotPlayback);
+    clock.advanceBy(50);
+    expect(game.playbackFrame).toEqual({ position: { x: .5, y: 0 }, speed: .5, complete: false });
+    game.tick();
+    expect(game.camera.position()).toEqual({ x: .5, y: 0 }); expect(game.playbackFrame).toEqual(playback?.frame());
+  });
   it("AC-GME-001-02 persists aim and resets Driver/direction at a new Hole", async () => { const { game, clock } = makeGame("cup"); clock.advanceBy(1_000); game.tick(); game.key("ArrowDown"); game.key(" "); game.key("release"); game.key(" "); await flush(); clock.advanceBy(100); game.tick(); game.key("Enter"); await flush(); expect(game.round.selectedClub).toBe("driver"); expect(game.round.shotDirectionIndex).toBe(4); });
   it("AC-GME-001-03 summary text is input driven and scorecard is ordered", () => { const { game, clock } = makeGame(); clock.advanceBy(1_000); game.tick(); expect(game.state.kind).toBe("aiming"); });
   it("AC-GME-001-04 intro is one second active time and resize freezes it", () => { const { game, clock } = makeGame(); clock.advanceBy(999); game.tick(); game.resize(59, 20); clock.advanceBy(5_000); game.resize(60, 20); game.tick(); expect(game.state.kind).toBe("intro"); clock.advanceBy(1); game.tick(); expect(game.state.kind).toBe("aiming"); });

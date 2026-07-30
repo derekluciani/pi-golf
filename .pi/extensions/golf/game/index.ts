@@ -7,7 +7,7 @@ import { bearingToward, quantizeShotDirection, selectAdjacentClub, selectAdjacen
 import { toDurableShot, type DurableResolvedShot, type ResolvedShot } from "../simulation/outcome.ts";
 import type { Course, CourseHole, RoundCourseSnapshot } from "../course-loader/types.ts";
 import { appendRoundReplacement, type ReconstructedRound, type RoundStore } from "../persistence/index.ts";
-import { ResolvedShotPlayback, type CameraController, type ScoringHud } from "../ui/index.ts";
+import { ResolvedShotPlayback, type CameraController, type PlaybackFrame, type ScoringHud } from "../ui/index.ts";
 
 /** Nine mutually-exclusive states; resize-paused is an orthogonal wrapper. */
 export const GAME_BASE_STATES = ["intro", "aiming", "metering", "committing", "playback", "penalty-notice", "hole-summary", "round-summary", "confirm-abandon"] as const;
@@ -113,6 +113,12 @@ export class GameController {
   async whenIdle(): Promise<void> { await Promise.all([this.#commitPromise, this.#advancePromise, this.#checkpointPromise, this.#terminalPromise, this.#replacementPromise].filter((work): work is Promise<void> => work !== null)); }
   get closed(): boolean { return this.#closed; }
   get hudVisible(): boolean { return this.#hudVisible; }
+  /** T11 consumes the same T08 controller that the FSM updates; it owns no camera mirror. */
+  get camera(): CameraController { return this.#presentation.camera; }
+  /** The resolved presentation-only playback, when a committed Shot is animating. */
+  get playback(): ResolvedShotPlayback | null { return this.#playback; }
+  /** A sampled Ball frame for rendering; sampling cannot mutate Round or presentation state. */
+  get playbackFrame(): PlaybackFrame | null { return this.#playback?.frame() ?? null; }
   get meterBlocks(): number { return this.#base.kind === "metering" ? meterBlocksAt(this.now() - this.#base.beganAt) : POWER_METER.minimumBlocks; }
   get introText(): string { const hole = this.hole(); return `${this.#course.name} — Hole ${hole.number} — Par ${hole.par}`; }
   get confirmationText(): string { return "Abandon the active Round?"; }
