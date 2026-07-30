@@ -13,7 +13,7 @@ import {
   vectorForShotDirection,
 } from "./domain/index.ts";
 import registerGolfExtension from "./index.ts";
-import { GolfRoundComponent, mirrorAcceptedMutations } from "./command-round.ts";
+import { GolfRoundComponent, mapPiGolfKeyInput, mirrorAcceptedMutations } from "./command-round.ts";
 import { type GameController, type GameWriter } from "./game/index.ts";
 import { GOLF_BRANCH_REFERENCE_TYPE, RoundStore, type GolfEntryV1 } from "./persistence/index.ts";
 
@@ -291,6 +291,34 @@ describe("V2-FND-001 project-local extension foundation", () => {
       [GOLF_BRANCH_REFERENCE_TYPE, { roundId: "mirror-round", revision: 2 }],
       [GOLF_BRANCH_REFERENCE_TYPE, { roundId: "mirror-round", revision: 3 }],
     ]);
+  });
+
+  it("AC-CMD-001-03 AC-UI-002-03 maps Pi 0.82.1 legacy and Kitty Enter/Space events without treating releases as presses", () => {
+    expect(mapPiGolfKeyInput(" ")).toEqual({ key: " ", repeat: false });
+    expect(mapPiGolfKeyInput("\r")).toEqual({ key: "Enter", repeat: false });
+    expect(mapPiGolfKeyInput("\u001b[32;1:1u")).toEqual({ key: " ", repeat: false });
+    expect(mapPiGolfKeyInput("\u001b[13;1:1u")).toEqual({ key: "Enter", repeat: false });
+    expect(mapPiGolfKeyInput("\u001b[57414;1:1u")).toEqual({ key: "Enter", repeat: false });
+    expect(mapPiGolfKeyInput("\u001b[32;1:2u")).toEqual({ key: " ", repeat: true });
+    expect(mapPiGolfKeyInput("\u001b[13;1:2u")).toEqual({ key: "Enter", repeat: true });
+    expect(mapPiGolfKeyInput("\u001b[32;1:3u")).toBeNull();
+    expect(mapPiGolfKeyInput("\u001b[13;1:3u")).toBeNull();
+  });
+
+  it("AC-CMD-001-03 AC-UI-002-03 delivers focused Pi TUI raw meter-start/stop bytes to the GameController", () => {
+    const game = { closed: false, key: vi.fn(), tick: vi.fn(), whenIdle: vi.fn(async () => undefined) };
+    const parsedCourse = validateCourse(JSON.parse(COMMAND_COURSE));
+    if (!parsedCourse.ok) throw new Error("Render fixture Course must be valid.");
+    const component = new GolfRoundComponent(game as unknown as GameController, parsedCourse.value, { requestRender: vi.fn() } as unknown as TUI, {} as Theme, vi.fn());
+    try {
+      component.handleInput(" ");
+      component.handleInput("\u001b[13;1:1u");
+      component.handleInput("\u001b[32;1:2u");
+      component.handleInput("\u001b[13;1:3u");
+      expect(game.key.mock.calls).toEqual([
+        [" ", undefined, false], ["Enter", undefined, false], [" ", undefined, true],
+      ]);
+    } finally { component.dispose(); }
   });
 
   it("AC-CMD-001-03 deferred Esc close waits for accepted durability and completes the overlay once", async () => {
