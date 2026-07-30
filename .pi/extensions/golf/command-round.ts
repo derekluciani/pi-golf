@@ -3,16 +3,16 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, type Component, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { matchesKey, sliceByColumn, type Component, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 import { createRoundCourseSnapshot } from "./course-loader/snapshot.ts";
-import { captureSelectedCourseSnapshot, formatCourseLoadIssue, PREVIEW_COURSE_SOURCE, readStableCourseFile, terrainAtPoint } from "./course-loader/index.ts";
-import type { CourseHole, Point, RoundCourseSnapshot } from "./course-loader/types.ts";
+import { captureSelectedCourseSnapshot, formatCourseLoadIssue, OUT_OF_BOUNDS, PREVIEW_COURSE_SOURCE, readStableCourseFile, terrainAtPoint } from "./course-loader/index.ts";
+import type { Course, CourseHole, Point, RoundCourseSnapshot } from "./course-loader/types.ts";
 import { SystemMonotonicClock, type PlayableTerrain } from "./domain/index.ts";
 import { GameController, gameOptionsFromRecovered, newRoundState, type GameWriter } from "./game/index.ts";
 import { appendRoundReplacement, appendRoundStart, reconstructActiveBranch, RoundMutationWriter, RoundStore, type ReconstructedRound } from "./persistence/index.ts";
-import { resolveShot } from "./simulation/index.ts";
-import { CameraController } from "./ui/index.ts";
+import { projectTarget, resolveShot } from "./simulation/index.ts";
+import { CameraController, createHudPanels, renderMarkerTile, renderTerrainTile, selectVisibleMarker, type RenderMarker } from "./ui/index.ts";
 import { openGolfOverlay } from "./ui/overlay.ts";
 
 const ACTIVE_COMMANDS = new Map<string, Promise<void>>();
@@ -76,22 +76,31 @@ function keyName(data: string): string | null {
   return null;
 }
 
-export interface GolfRoundGame {
-  readonly state: { readonly kind: string };
-  readonly closed: boolean;
-  tick(): void;
-  key(key: string): void;
-  whenIdle(): Promise<void>;
-  roundScore(): number;
-  readonly introText: string;
+function centerLine(text: string, width: number): string {
+  const cropped = truncateToWidth(text, width);
+  return `${" ".repeat(Math.max(0, Math.floor((width - visibleWidth(cropped)) / 2)))}${cropped}`;
 }
 
+function overlayPanel(row: string, width: number, left: string | undefined, right: string | undefined): string {
+  const evenPanel = (text: string, prepend: boolean): string => {
+    const cropped = truncateToWidth(text, Math.floor(width / 2));
+    return visibleWidth(cropped) % 2 === 0 ? cropped : prepend ? ` ${cropped}` : `${cropped} `;
+  };
+  const leftText = left === undefined ? "" : evenPanel(left, false);
+  const rightText = right === undefined ? "" : evenPanel(right, true);
+  const middleStart = visibleWidth(leftText);
+  const middleEnd = Math.max(middleStart, width - visibleWidth(rightText));
+  return `${leftText}${sliceByColumn(row, middleStart, middleEnd - middleStart)}${rightText}`;
+}
+
+/** T11 host-only composition of the authoritative T08/T10 presentation models. */
 export class GolfRoundComponent implements Component {
   #timer: ReturnType<typeof setInterval>;
   #closed = false;
 
   constructor(
-    private readonly game: GolfRoundGame,
+    private readonly game: GameController,
+    private readonly course: Course,
     private readonly tui: TUI,
     private readonly theme: Theme,
     private readonly done: () => void,
@@ -104,15 +113,65 @@ export class GolfRoundComponent implements Component {
   }
 
   render(width: number): string[] {
-    const state = this.game.state.kind === "resize-paused" ? "resize paused" : this.game.state.kind;
-    const lines = [
-      this.theme.fg("accent", this.theme.bold("Pi Golf")),
-      this.game.introText,
-      `Round state: ${state}`,
-      `Score: ${this.game.roundScore()}`,
-      "Esc saves and closes · arrows aim · Space starts a Stroke",
+    const height = this.tui.terminal?.rows ?? 20;
+    this.game.resize(width, height);
+    if (width < 60 || height < 20) return [centerLine("Pi Golf needs at least 60 × 20 terminal cells.", width)];
+    const columns = Math.floor(Math.min(120, Math.floor(width)) / 2) * 2;
+    const rows = Math.min(60, Math.floor(height));
+    const hole = this.course.holes[this.game.round.currentHoleIndex];
+    if (hole === undefined) return [centerLine("Current Course Hole is unavailable.", width)];
+    const state = this.game.state.kind === "resize-paused" ? this.game.state.suspended.kind : this.game.state.kind;
+    if (state === "intro") return Array.from({ length: rows }, (_, row) => row === Math.floor(rows / 2) ? centerLine(this.game.introText, columns) : "");
+    if (state === "confirm-abandon") return Array.from({ length: rows }, (_, row) => row === Math.floor(rows / 2) ? centerLine(this.game.confirmationText, columns) : "");
+    const summary = state === "round-summary" ? this.roundSummaryLines() : state === "hole-summary" ? this.holeSummaryLines() : null;
+    if (summary !== null) return Array.from({ length: rows }, (_, row) => {
+      const line = summary[row - Math.floor((rows - summary.length) / 2)];
+      return line === undefined ? "" : centerLine(line, columns);
+    });
+
+    const camera = this.game.camera.position();
+    const originX = Math.floor(camera.x - Math.floor(columns / 2) / 2);
+    const originY = Math.floor(camera.y - rows / 2);
+    const ball = this.game.playbackFrame?.position ?? this.game.round.lie;
+    const lieTerrain = terrainForShot(hole, this.game.round.lie);
+    const target = projectTarget({
+      lie: this.game.round.lie, lieTerrain, club: this.game.round.selectedClub, power: 1,
+      directionIndex: this.game.round.shotDirectionIndex,
+      isInsideCourseBoundary: (point) => terrainAtPoint(hole, point) !== OUT_OF_BOUNDS,
+    });
+    const markers: RenderMarker[] = [
+      { kind: "ball", point: ball },
+      { kind: lieTerrain === "green" ? "cup" : "flag", point: hole.cup },
+      ...(state === "aiming" ? [{ kind: "target" as const, point: target.position }] : []),
     ];
-    return lines.map((line) => truncateToWidth(line, width));
+    const panels = createHudPanels(this.game.hudScore, {
+      club: this.game.round.selectedClub, lieTerrain, shotDirection: `${this.game.round.shotDirectionIndex * 22.5}°`,
+      targetDistance: `${target.distance} Course Units`, oobTargetWarning: target.isOutOfBounds,
+    }, ["Arrows aim · Space Stroke", "Tab camera · H HUD · Esc save"],
+    state === "metering" ? [this.theme.fg("accent", "█".repeat(this.game.meterBlocks))] : this.game.playbackFrame === null ? [] : [`Ball Speed ${this.game.playbackFrame.speed.toFixed(2)}`]);
+
+    return Array.from({ length: rows }, (_, row) => {
+      const terrain = Array.from({ length: Math.floor(columns / 2) }, (_, column) => terrainAtPoint(hole, { x: originX + column + .5, y: originY + row + .5 }));
+      const rendered = terrain.map(renderTerrainTile);
+      for (let column = 0; column < rendered.length; column += 1) {
+        const point = { x: originX + column, y: originY + row };
+        const visible = selectVisibleMarker(markers.filter((marker) => Math.floor(marker.point.x) === point.x && Math.floor(marker.point.y) === point.y));
+        if (visible !== undefined) rendered[column] = renderMarkerTile(visible);
+      }
+      const canvas = rendered.join("");
+      if (!this.game.hudVisible) return canvas;
+      return overlayPanel(canvas, columns, panels.topLeft[row] ?? panels.bottomLeft[row - (rows - panels.bottomLeft.length)], panels.topRight[row] ?? panels.bottomRight[row - (rows - panels.bottomRight.length)]);
+    });
+  }
+
+  private holeSummaryLines(): readonly string[] {
+    const summary = this.game.holeSummary();
+    return summary === null ? [] : [summary.text, `Hole ${summary.score.holeNumber} · Par ${summary.score.par}`, `Played Strokes ${summary.score.playedStrokes} · Penalty Strokes ${summary.score.penaltyStrokes}`, `Hole Score ${summary.score.holeScore} · Round Score ${summary.roundScore}`, "Enter or Space to continue"];
+  }
+
+  private roundSummaryLines(): readonly string[] {
+    const summary = this.game.roundSummary();
+    return summary === null ? [] : ["Round complete", ...summary.scorecard.map((line) => `Hole ${line.holeNumber} · Par ${line.par} · Hole Score ${line.holeScore}`), `Round Score ${summary.roundScore} · Total Par ${summary.totalPar}`, "R new Round · Esc save and close"];
   }
 
   handleInput(data: string): void {
@@ -123,9 +182,7 @@ export class GolfRoundComponent implements Component {
   }
 
   invalidate(): void {}
-
   dispose(): void { clearInterval(this.#timer); }
-
   async closeAfterDurability(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
@@ -194,7 +251,7 @@ async function buildGame(
 
 async function openRound(pi: ExtensionAPI, ctx: ExtensionCommandContext, store: RoundStore, round: ReconstructedRound, snapshot: RoundCourseSnapshot): Promise<void> {
   const game = await buildGame(pi, store, ctx.sessionManager.getSessionId(), round, snapshot);
-  await openGolfOverlay(ctx, (tui, theme, _keybindings, done) => new GolfRoundComponent(game, tui, theme, () => done(undefined)));
+  await openGolfOverlay(ctx, (tui, theme, _keybindings, done) => new GolfRoundComponent(game, snapshot.course, tui, theme, () => done(undefined)));
 }
 
 async function startRound(store: RoundStore, snapshot: RoundCourseSnapshot, branchId: string): Promise<ReconstructedRound> {

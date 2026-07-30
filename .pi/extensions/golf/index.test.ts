@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 
 import { validateCourse } from "./course-loader/index.ts";
@@ -14,7 +14,7 @@ import {
 } from "./domain/index.ts";
 import registerGolfExtension from "./index.ts";
 import { GolfRoundComponent, mirrorAcceptedMutations } from "./command-round.ts";
-import type { GameWriter } from "./game/index.ts";
+import { type GameController, type GameWriter } from "./game/index.ts";
 import { GOLF_BRANCH_REFERENCE_TYPE, RoundStore, type GolfEntryV1 } from "./persistence/index.ts";
 
 async function readProjectFile(path: string): Promise<string> {
@@ -308,7 +308,9 @@ describe("V2-FND-001 project-local extension foundation", () => {
         roundScore: () => 0,
         introText: "Course — Hole 1 — Par 3",
       };
-      const component = new GolfRoundComponent(game, { requestRender } as unknown as TUI, {} as Theme, done);
+      const parsedCourse = validateCourse(JSON.parse(COMMAND_COURSE));
+      if (!parsedCourse.ok) throw new Error("Render fixture Course must be valid.");
+      const component = new GolfRoundComponent(game as unknown as GameController, parsedCourse.value, { requestRender } as unknown as TUI, {} as Theme, done);
       component.handleInput("\u001b");
       await vi.advanceTimersByTimeAsync(50);
       expect(done).not.toHaveBeenCalled();
@@ -319,6 +321,28 @@ describe("V2-FND-001 project-local extension foundation", () => {
       expect(game.whenIdle).toHaveBeenCalledTimes(1);
       expect(requestRender).toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
+  });
+
+  it("AC-CMD-001-03 composes the authoritative T08 terrain, HUD, meter, and playback frame into the playable Round overlay", () => {
+    const parsedCourse = validateCourse(JSON.parse(COMMAND_COURSE));
+    if (!parsedCourse.ok) throw new Error("Render fixture Course must be valid.");
+    const game = {
+      state: { kind: "metering" }, closed: false, round: commandState(), hudVisible: true,
+      camera: { position: () => ({ x: 1, y: 1 }) }, playbackFrame: { position: { x: 1, y: 1 }, speed: 2.5, complete: false },
+      meterBlocks: 3, introText: "Command Course — Hole 1 — Par 3", confirmationText: "Abandon the active Round?",
+      hudScore: { hole: 1, par: 3, playedStrokes: 0, penaltyStrokes: 0, holeScore: 0, roundScore: 0 },
+      tick: vi.fn(), key: vi.fn(), resize: vi.fn(), whenIdle: vi.fn(async () => undefined),
+      holeSummary: () => null, roundSummary: () => null,
+    };
+    const component = new GolfRoundComponent(game as unknown as GameController, parsedCourse.value, { terminal: { rows: 20 }, requestRender: vi.fn() } as unknown as TUI, { fg: (_name: string, text: string) => text } as unknown as Theme, vi.fn());
+    try {
+      const lines = component.render(61);
+      expect(lines).toHaveLength(20);
+      expect(lines.join("\n")).toContain("Hole Score 0");
+      expect(lines.join("\n")).toContain("Club driver");
+      expect(lines.join("\n")).toContain("███");
+      expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);
+    } finally { component.dispose(); }
   });
 
   it("AC-CMD-001-03 returns the interactive-TUI-required response outside TUI", async () => {
