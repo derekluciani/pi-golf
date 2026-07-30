@@ -8,11 +8,11 @@ import { matchesKey, sliceByColumn, type Component, type TUI, truncateToWidth, v
 import { createRoundCourseSnapshot } from "./course-loader/snapshot.ts";
 import { captureSelectedCourseSnapshot, formatCourseLoadIssue, OUT_OF_BOUNDS, PREVIEW_COURSE_SOURCE, readStableCourseFile, terrainAtPoint } from "./course-loader/index.ts";
 import type { Course, CourseHole, Point, RoundCourseSnapshot } from "./course-loader/types.ts";
-import { SystemMonotonicClock, type PlayableTerrain } from "./domain/index.ts";
-import { GameController, gameOptionsFromRecovered, newRoundState, type GameWriter } from "./game/index.ts";
+import { POWER_METER, SystemMonotonicClock, type PlayableTerrain } from "./domain/index.ts";
+import { GameController, gameOptionsFromRecovered, newRoundState, renderPowerMeter, type GameWriter } from "./game/index.ts";
 import { appendRoundReplacement, appendRoundStart, reconstructActiveBranch, RoundMutationWriter, RoundStore, type ReconstructedRound } from "./persistence/index.ts";
-import { projectTarget, resolveShot } from "./simulation/index.ts";
-import { CameraController, allocateViewport, createHudPanels, hudInset, hudSafePoint, offscreenArrow, renderMarkerTile, renderTerrainTile, selectVisibleMarker, type HudInset, type RenderMarker } from "./ui/index.ts";
+import { projectTarget, resolveShot, type TargetProjection } from "./simulation/index.ts";
+import { CameraController, allocateViewport, createHudPanels, goalMarkerForShotOrigin, hudInset, hudSafePoint, offscreenArrow, predictionMarkers, renderMarkerTile, renderTerrainTile, selectVisibleMarker, type HudInset, type RenderMarker } from "./ui/index.ts";
 import { openGolfOverlay } from "./ui/overlay.ts";
 
 const ACTIVE_COMMANDS = new Map<string, Promise<void>>();
@@ -81,6 +81,21 @@ function centerLine(text: string, width: number): string {
   return `${" ".repeat(Math.max(0, Math.floor((width - visibleWidth(cropped)) / 2)))}${cropped}`;
 }
 
+function predictionPath(target: TargetProjection): readonly Point[] {
+  const path: Point[] = [];
+  const delta = { x: target.position.x - target.origin.x, y: target.position.y - target.origin.y };
+  for (let distance = 1; distance < target.distance; distance += 1) {
+    path.push({ x: target.origin.x + delta.x * distance / target.distance, y: target.origin.y + delta.y * distance / target.distance });
+  }
+  return path;
+}
+
+function fixedColor(text: string, color: `#${string}`): string {
+  const match = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/iu.exec(color);
+  if (match === null) throw new Error("Rendering color must be six-digit hexadecimal.");
+  return `\u001b[38;2;${Number.parseInt(match[1] ?? "", 16)};${Number.parseInt(match[2] ?? "", 16)};${Number.parseInt(match[3] ?? "", 16)}m${text}\u001b[0m`;
+}
+
 function overlayPanel(row: string, width: number, left: string | undefined, right: string | undefined): string {
   const evenPanel = (text: string, prepend: boolean): string => {
     const cropped = truncateToWidth(text, Math.floor(width / 2));
@@ -102,7 +117,7 @@ export class GolfRoundComponent implements Component {
     private readonly game: GameController,
     private readonly course: Course,
     private readonly tui: TUI,
-    private readonly theme: Theme,
+    _theme: Theme,
     private readonly done: () => void,
   ) {
     this.#timer = setInterval(() => {
@@ -120,7 +135,9 @@ export class GolfRoundComponent implements Component {
     const rows = Math.min(60, Math.floor(height));
     const hole = this.course.holes[this.game.round.currentHoleIndex];
     if (hole === undefined) return [centerLine("Current Course Hole is unavailable.", width)];
-    const state = this.game.state.kind === "resize-paused" ? this.game.state.suspended.kind : this.game.state.kind;
+    const gameState = this.game.state;
+    const baseState = gameState.kind === "resize-paused" ? gameState.suspended : gameState;
+    const state = baseState.kind;
     if (state === "intro") return Array.from({ length: rows }, (_, row) => row === Math.floor(rows / 2) ? centerLine(this.game.introText, columns) : "");
     if (state === "confirm-abandon") return Array.from({ length: rows }, (_, row) => row === Math.floor(rows / 2) ? centerLine(this.game.confirmationText, columns) : "");
     const summary = state === "round-summary" ? this.roundSummaryLines() : state === "hole-summary" ? this.holeSummaryLines() : null;
@@ -139,16 +156,21 @@ export class GolfRoundComponent implements Component {
       directionIndex: this.game.round.shotDirectionIndex,
       isInsideCourseBoundary: (point) => terrainAtPoint(hole, point) !== OUT_OF_BOUNDS,
     });
+    const shotOriginTerrain = baseState.kind === "playback"
+      ? terrainForShot(hole, baseState.shot.preShotLie)
+      : lieTerrain;
     const markers: readonly RenderMarker[] = [
       { kind: "ball", point: ball },
-      { kind: lieTerrain === "green" ? "cup" : "flag", point: hole.cup },
-      ...(state === "aiming" ? [{ kind: "target" as const, point: target.position }] : []),
+      { kind: goalMarkerForShotOrigin(shotOriginTerrain), point: hole.cup },
+      ...predictionMarkers({ isAiming: state === "aiming", target, path: predictionPath(target) }),
     ];
     const panels = createHudPanels(this.game.hudScore, {
       club: this.game.round.selectedClub, lieTerrain, shotDirection: `${this.game.round.shotDirectionIndex * 22.5}°`,
       targetDistance: `${target.distance} Course Units`, oobTargetWarning: target.isOutOfBounds,
     }, ["Arrows aim · Space Stroke", "Tab camera · H HUD · Esc save"],
-    state === "metering" ? [this.theme.fg("accent", "█".repeat(this.game.meterBlocks))] : this.game.playbackFrame === null ? [] : [`Ball Speed ${this.game.playbackFrame.speed.toFixed(2)}`]);
+    state === "metering"
+      ? [fixedColor(renderPowerMeter(this.game.meterBlocks).blocks, POWER_METER.color)]
+      : this.game.playbackFrame === null ? [] : [`Ball Speed ${this.game.playbackFrame.speed.toFixed(2)}`]);
     const viewport = allocateViewport(columns, rows);
     const inset: HudInset = {
       top: Math.max(panels.topLeft.length, panels.topRight.length),

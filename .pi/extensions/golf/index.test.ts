@@ -340,7 +340,7 @@ describe("V2-FND-001 project-local extension foundation", () => {
       expect(lines).toHaveLength(20);
       expect(lines.join("\n")).toContain("Hole Score 0");
       expect(lines.join("\n")).toContain("Club driver");
-      expect(lines.join("\n")).toContain("███");
+      expect(lines.join("\n")).toContain("\u001b[38;2;237;135;150m███\u001b[0m");
       expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);
     } finally { component.dispose(); }
   });
@@ -373,7 +373,37 @@ describe("V2-FND-001 project-local extension foundation", () => {
         // off-canvas Target becomes a right arrow below the top-right panel.
         expect(canvas).toContain("●");
         expect(canvas).toContain(goal);
+        expect(canvas).toContain("·");
         expect(canvas).toContain("→");
+      } finally { component.dispose(); }
+    }
+  });
+
+  it("AC-CMD-001-03 keeps the Flag/Cup selected at Shot origin through playback", () => {
+    for (const [originTerrain, expectedGoal] of [["fairway", "⚑"], ["green", "○"]] as const) {
+      const parsedCourse = validateCourse({
+        schemaVersion: 1, id: `playback-origin-${originTerrain}`, name: "Playback Origin Course",
+        holes: [{
+          id: "playback-origin-hole", number: 1, par: 3,
+          boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 0, y: 20 }] },
+          tee: { x: 1, y: 1 }, cup: { x: 9, y: 7 },
+          regions: [
+            { terrain: originTerrain, shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 0, y: 20 }] } },
+            ...(originTerrain === "fairway" ? [{ terrain: "green" as const, shape: { type: "polygon" as const, points: [{ x: 8, y: 6 }, { x: 10, y: 6 }, { x: 10, y: 8 }, { x: 8, y: 8 }] } }] : []),
+          ],
+        }],
+      });
+      if (!parsedCourse.ok) throw new Error("Playback origin Course fixture must be valid.");
+      const game = {
+        state: { kind: "playback", shot: { preShotLie: { x: 1, y: 1 } }, beganAt: 0, queued: null }, closed: false,
+        round: { ...commandState(), lie: { x: 9, y: 7 } }, hudVisible: false,
+        camera: { position: () => ({ x: 15, y: 10 }) }, playbackFrame: { position: { x: 5, y: 7 }, speed: 0, complete: false }, meterBlocks: 0,
+        introText: "", confirmationText: "", hudScore: { hole: 1, par: 3, playedStrokes: 1, penaltyStrokes: 0, holeScore: 1, roundScore: 1 },
+        tick: vi.fn(), key: vi.fn(), resize: vi.fn(), whenIdle: vi.fn(async () => undefined), holeSummary: () => null, roundSummary: () => null,
+      };
+      const component = new GolfRoundComponent(game as unknown as GameController, parsedCourse.value, { terminal: { rows: 20 }, requestRender: vi.fn() } as unknown as TUI, {} as Theme, vi.fn());
+      try {
+        expect(component.render(60).join("\n")).toContain(expectedGoal);
       } finally { component.dispose(); }
     }
   });
