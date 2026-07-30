@@ -345,6 +345,39 @@ describe("V2-FND-001 project-local extension foundation", () => {
     } finally { component.dispose(); }
   });
 
+  it("AC-CMD-001-03 composes T08 HUD-safe marker placement and deterministic off-canvas arrows at panel boundaries", () => {
+    for (const [terrain, goal] of [["green", "○"], ["fairway", "⚑"]] as const) {
+      const parsedCourse = validateCourse({
+        schemaVersion: 1, id: `hud-safe-${terrain}`, name: "HUD Safe Course",
+        holes: [{
+          id: "hud-safe-hole", number: 1, par: 3,
+          boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 0, y: 20 }] },
+          tee: { x: 1, y: 1 }, cup: { x: 9, y: 7 },
+          regions: [
+            { terrain, shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 60, y: 0 }, { x: 60, y: 20 }, { x: 0, y: 20 }] } },
+            ...(terrain === "fairway" ? [{ terrain: "green" as const, shape: { type: "polygon" as const, points: [{ x: 8, y: 6 }, { x: 10, y: 6 }, { x: 10, y: 8 }, { x: 8, y: 8 }] } }] : []),
+          ],
+        }],
+      });
+      if (!parsedCourse.ok) throw new Error("HUD-safe Course fixture must be valid.");
+      const game = {
+        state: { kind: "aiming" }, closed: false, round: commandState(), hudVisible: true,
+        camera: { position: () => ({ x: 15, y: 10 }) }, playbackFrame: null, meterBlocks: 0,
+        introText: "", confirmationText: "", hudScore: { hole: 1, par: 3, playedStrokes: 0, penaltyStrokes: 0, holeScore: 0, roundScore: 0 },
+        tick: vi.fn(), key: vi.fn(), resize: vi.fn(), whenIdle: vi.fn(async () => undefined), holeSummary: () => null, roundSummary: () => null,
+      };
+      const component = new GolfRoundComponent(game as unknown as GameController, parsedCourse.value, { terminal: { rows: 20 }, requestRender: vi.fn() } as unknown as TUI, { fg: (_name: string, text: string) => text } as Theme, vi.fn());
+      try {
+        const canvas = component.render(60).join("\n");
+        // Ball begins below the top-left panel, goal remains below it, and the
+        // off-canvas Target becomes a right arrow below the top-right panel.
+        expect(canvas).toContain("●");
+        expect(canvas).toContain(goal);
+        expect(canvas).toContain("→");
+      } finally { component.dispose(); }
+    }
+  });
+
   it("AC-CMD-001-03 returns the interactive-TUI-required response outside TUI", async () => {
     const registerCommand = vi.fn(); const notify = vi.fn();
     registerGolfExtension({ registerCommand } as unknown as ExtensionAPI);

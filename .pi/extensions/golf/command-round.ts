@@ -12,7 +12,7 @@ import { SystemMonotonicClock, type PlayableTerrain } from "./domain/index.ts";
 import { GameController, gameOptionsFromRecovered, newRoundState, type GameWriter } from "./game/index.ts";
 import { appendRoundReplacement, appendRoundStart, reconstructActiveBranch, RoundMutationWriter, RoundStore, type ReconstructedRound } from "./persistence/index.ts";
 import { projectTarget, resolveShot } from "./simulation/index.ts";
-import { CameraController, createHudPanels, renderMarkerTile, renderTerrainTile, selectVisibleMarker, type RenderMarker } from "./ui/index.ts";
+import { CameraController, allocateViewport, createHudPanels, hudInset, hudSafePoint, offscreenArrow, renderMarkerTile, renderTerrainTile, selectVisibleMarker, type HudInset, type RenderMarker } from "./ui/index.ts";
 import { openGolfOverlay } from "./ui/overlay.ts";
 
 const ACTIVE_COMMANDS = new Map<string, Promise<void>>();
@@ -139,7 +139,7 @@ export class GolfRoundComponent implements Component {
       directionIndex: this.game.round.shotDirectionIndex,
       isInsideCourseBoundary: (point) => terrainAtPoint(hole, point) !== OUT_OF_BOUNDS,
     });
-    const markers: RenderMarker[] = [
+    const markers: readonly RenderMarker[] = [
       { kind: "ball", point: ball },
       { kind: lieTerrain === "green" ? "cup" : "flag", point: hole.cup },
       ...(state === "aiming" ? [{ kind: "target" as const, point: target.position }] : []),
@@ -149,13 +149,32 @@ export class GolfRoundComponent implements Component {
       targetDistance: `${target.distance} Course Units`, oobTargetWarning: target.isOutOfBounds,
     }, ["Arrows aim · Space Stroke", "Tab camera · H HUD · Esc save"],
     state === "metering" ? [this.theme.fg("accent", "█".repeat(this.game.meterBlocks))] : this.game.playbackFrame === null ? [] : [`Ball Speed ${this.game.playbackFrame.speed.toFixed(2)}`]);
+    const viewport = allocateViewport(columns, rows);
+    const inset: HudInset = {
+      top: Math.max(panels.topLeft.length, panels.topRight.length),
+      right: Math.ceil(Math.max(0, ...panels.topRight.map(visibleWidth)) / 2),
+      bottom: Math.max(panels.bottomLeft.length, panels.bottomRight.length),
+      left: Math.ceil(Math.max(0, ...panels.topLeft.map(visibleWidth)) / 2),
+    };
+    const safeInset = hudInset({ visible: this.game.hudVisible, inset });
+    // T08 markers retain their canonical world positions; only their display
+    // positions are clamped away from in-canvas HUD panels. Off-canvas markers
+    // become deterministic arrows at that same HUD-safe canvas edge.
+    const displayMarkers = markers.map((marker): RenderMarker => {
+      const local = { x: Math.floor(marker.point.x) - originX, y: Math.floor(marker.point.y) - originY };
+      const arrow = offscreenArrow(marker.point, { x: originX, y: originY }, viewport.courseUnitsWide, viewport.courseUnitsHigh);
+      const safe = hudSafePoint(local, viewport, safeInset);
+      return arrow === undefined
+        ? { ...marker, point: { x: originX + safe.x, y: originY + safe.y } }
+        : { kind: "offscreen-arrow", arrow, point: { x: originX + safe.x, y: originY + safe.y } };
+    });
 
     return Array.from({ length: rows }, (_, row) => {
       const terrain = Array.from({ length: Math.floor(columns / 2) }, (_, column) => terrainAtPoint(hole, { x: originX + column + .5, y: originY + row + .5 }));
       const rendered = terrain.map(renderTerrainTile);
       for (let column = 0; column < rendered.length; column += 1) {
         const point = { x: originX + column, y: originY + row };
-        const visible = selectVisibleMarker(markers.filter((marker) => Math.floor(marker.point.x) === point.x && Math.floor(marker.point.y) === point.y));
+        const visible = selectVisibleMarker(displayMarkers.filter((marker) => Math.floor(marker.point.x) === point.x && Math.floor(marker.point.y) === point.y));
         if (visible !== undefined) rendered[column] = renderMarkerTile(visible);
       }
       const canvas = rendered.join("");
