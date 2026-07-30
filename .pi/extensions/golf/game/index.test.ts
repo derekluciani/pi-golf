@@ -330,6 +330,39 @@ describe("V2-T10 FSM and game component", () => {
     }
   });
 
+  it("AC-UI-001-02 toggles H HUD effect in every open base state without canonical Round or writer mutation", async () => {
+    const assertHudToggle = (fixture: { game: GameController; clock: ManualMonotonicClock; writer: Writer }): void => {
+      const beforeState = structuredClone(fixture.game.state); const beforeRound = structuredClone(fixture.game.round); const beforeWrites = [fixture.writer.shots, fixture.writer.checkpoints, fixture.writer.terminals];
+      expect(fixture.game.hudVisible).toBe(true);
+      fixture.game.key("H", fixture.clock.now());
+      expect(fixture.game.hudVisible).toBe(false); expect(fixture.game.state).toEqual(beforeState); expect(fixture.game.round).toEqual(beforeRound); expect([fixture.writer.shots, fixture.writer.checkpoints, fixture.writer.terminals]).toEqual(beforeWrites);
+      fixture.game.key("H", fixture.clock.now());
+      expect(fixture.game.hudVisible).toBe(true); expect(fixture.game.state).toEqual(beforeState); expect(fixture.game.round).toEqual(beforeRound); expect([fixture.writer.shots, fixture.writer.checkpoints, fixture.writer.terminals]).toEqual(beforeWrites);
+    };
+    const makeSummary = async (): Promise<{ game: GameController; clock: ManualMonotonicClock; writer: Writer }> => {
+      const fixture = makeGame("cup");
+      for (let hole = 0; hole < course.holes.length; hole += 1) {
+        fixture.clock.advanceBy(1_000); fixture.game.tick(); fixture.game.key(" "); fixture.game.key("Enter", fixture.clock.now() + 150); await fixture.game.whenIdle();
+        fixture.clock.advanceBy(1_000); fixture.game.tick(); fixture.game.key("Enter"); await fixture.game.whenIdle();
+      }
+      expect(fixture.game.state.kind).toBe("round-summary"); return fixture;
+    };
+    const intro = makeGame();
+    const aiming = makeGame(); aiming.clock.advanceBy(1_000); aiming.game.tick();
+    const metering = makeGame(); metering.clock.advanceBy(1_000); metering.game.tick(); metering.game.key(" ");
+    class PendingWriter extends Writer { override async commitShot(): Promise<number> { this.shots += 1; return new Promise<number>(() => {}); } }
+    const committingClock = new ManualMonotonicClock(); const committingWriter = new PendingWriter(); const committingGame = new GameController({ course, state: initial, writer: committingWriter, clock: committingClock, shotId: () => "shot-1", resolve: (power) => ({ ...shot(), inputs: { ...shot().inputs, power } }), presentation: presentation(committingClock) });
+    committingClock.advanceBy(1_000); committingGame.tick(); committingGame.key(" "); committingGame.key("Enter", committingClock.now() + 150);
+    const playback = makeGame(); playback.clock.advanceBy(1_000); playback.game.tick(); playback.game.key(" "); playback.game.key("Enter", playback.clock.now() + 150); await playback.game.whenIdle();
+    const notice = makeGame("water"); notice.clock.advanceBy(1_000); notice.game.tick(); notice.game.key(" "); notice.game.key("Enter", notice.clock.now() + 150); await notice.game.whenIdle(); notice.clock.advanceBy(100); notice.game.tick();
+    const hole = makeGame("cup"); hole.clock.advanceBy(1_000); hole.game.tick(); hole.game.key(" "); hole.game.key("Enter", hole.clock.now() + 150); await hole.game.whenIdle(); hole.clock.advanceBy(1_000); hole.game.tick();
+    const summary = await makeSummary();
+    const confirmation = makeGame(); confirmation.clock.advanceBy(1_000); confirmation.game.tick(); confirmation.game.key("Q");
+    const cases = [intro, aiming, metering, { game: committingGame, clock: committingClock, writer: committingWriter }, playback, notice, hole, summary, confirmation] as const;
+    expect(cases.map((fixture) => fixture.game.state.kind)).toEqual(GAME_BASE_STATES);
+    for (const fixture of cases) assertHudToggle(fixture);
+  });
+
   it("AC-UI-003-01 AC-UI-003-02 restores a real Round summary unchanged after undersized allocation", async () => {
     const { game, clock, writer } = await (async () => {
       const fixture = makeGame("cup");
