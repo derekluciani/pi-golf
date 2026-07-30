@@ -54,7 +54,7 @@ function validPayload(kind: GolfEntryKind, value: unknown): boolean {
 }
 export const GOLF_ENTRY_MIGRATIONS: ReadonlyMap<number, (entry: unknown) => GolfEntryV1> = new Map();
 export function parseGolfEntry(value: unknown): ValidGolfEntry { const v = closed(value, ["entryVersion", "roundId", "revision", "kind", "payload"]); if (v === undefined || v.entryVersion !== 1 || typeof v.roundId !== "string" || !ROUND_ID.test(v.roundId) || !integer(v.revision) || v.revision < 0 || !["round-start", "shot", "checkpoint", "round-terminal", "round-replacement"].includes(v.kind as string) || !validPayload(v.kind as GolfEntryKind, v.payload)) throw new Error("Invalid Golf entry."); return v as ValidGolfEntry; }
-export interface ReconstructedRound { readonly roundId: string; readonly revision: number; readonly state: PersistedRoundState; readonly lifecycle: Lifecycle; readonly terminal: boolean; readonly replacement: string | null; readonly successorStart: RoundStartPayload | null; readonly branchId: string; }
+export interface ReconstructedRound { readonly roundId: string; readonly revision: number; readonly state: PersistedRoundState; readonly lifecycle: Lifecycle; /** Replayed from durable Shot entries; never presentation state. */ readonly currentHolePlayedStrokes: number; readonly currentHolePenaltyStrokes: number; readonly terminal: boolean; readonly replacement: string | null; readonly successorStart: RoundStartPayload | null; readonly branchId: string; }
 /** Strictly validates ordering and semantic state transitions; there is never an older-entry fallback. */
 export function reconstructRound(entries: readonly unknown[]): ReconstructedRound {
   if (entries.length === 0) throw new Error("Round log is empty.");
@@ -101,7 +101,7 @@ export function reconstructRound(entries: readonly unknown[]): ReconstructedRoun
       replacement = entry.payload.successorRoundId; successorStart = entry.payload.successorStart; terminal = true;
     }
   }
-  return { roundId: start.roundId, revision: parsed.length - 1, state: current, lifecycle, terminal, replacement, successorStart, branchId: start.payload.branchId };
+  return { roundId: start.roundId, revision: parsed.length - 1, state: current, lifecycle, currentHolePlayedStrokes: holePlayed, currentHolePenaltyStrokes: holePenalty, terminal, replacement, successorStart, branchId: start.payload.branchId };
 }
 export type WriteBoundary = "open" | "write" | "file-sync" | "directory-sync";
 export interface RoundStoreOptions { readonly root: string; readonly beforeWrite?: (boundary: WriteBoundary) => Promise<void> | void; readonly afterWrite?: (boundary: WriteBoundary) => Promise<void> | void; }

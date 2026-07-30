@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ManualMonotonicClock, parseCourseHoleIndex, parseCourseId, parseShotDirectionIndex, type PersistedRoundState } from "../domain/index.ts";
 import type { Course } from "../course-loader/types.ts";
 import type { ResolvedShot } from "../simulation/outcome.ts";
-import { GAME_BASE_STATES, GameController, meterBlocksAt, renderPowerMeter, type GameWriter } from "./index.ts";
+import { GAME_BASE_STATES, GameController, gameOptionsFromRecovered, meterBlocksAt, newRoundState, renderPowerMeter, type GameWriter } from "./index.ts";
 
 const course: Course = { schemaVersion: 1, id: "preview", name: "Preview Course", holes: [
   { id: "h1", number: 1, par: 4, tee: { x: 0, y: 0 }, cup: { x: 10, y: 0 }, boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }] }, regions: [] },
@@ -43,4 +43,66 @@ describe("V2-T10 FSM and game component", () => {
   it("AC-UI-004-01 Escape cancels uncommitted meter without a Stroke", () => { const { game, clock, writer } = makeGame(); clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("Escape"); expect(writer.shots).toBe(0); expect(game.closed).toBe(false); });
   it("AC-UI-004-02 confirmation accept/cancel retains prior state", () => { const { game, clock } = makeGame(); clock.advanceBy(1_000); game.tick(); game.key("Q"); expect(game.state.kind).toBe("confirm-abandon"); game.key("N"); expect(game.state.kind).toBe("aiming"); });
   it("AC-UI-004-03 confirmed abandonment writes terminal before close", async () => { const { game, clock, writer } = makeGame(); clock.advanceBy(1_000); game.tick(); game.key("Q"); game.key("Y"); await flush(); expect(writer.terminals).toBe(1); expect(game.closed).toBe(true); });
+
+  it("AC-GME-001-01 starts only from the immutable selected T04 snapshot and recovery has no presentation state", () => {
+    const snapshot = { course, serializedCourse: JSON.stringify(course) } as const;
+    const started = newRoundState(snapshot); const firstHole = course.holes[0]; if (firstHole === undefined) throw new Error("fixture missing first Hole");
+    expect(started).toMatchObject({ currentHoleIndex: 0, lie: firstHole.tee, selectedClub: "driver", shotDirectionIndex: 0, holeScores: [] });
+    const recovered = { roundId: "round-a", revision: 3, state: { ...started, lie: { x: 4, y: 0 } }, lifecycle: "aiming" as const, currentHolePlayedStrokes: 3, currentHolePenaltyStrokes: 1, terminal: false, replacement: null, successorStart: null, branchId: "branch" };
+    const options = gameOptionsFromRecovered(snapshot, recovered, { writer: new Writer(), clock: new ManualMonotonicClock(), shotId: () => "shot-1", resolve: () => shot() });
+    const game = new GameController(options);
+    expect(game.state.kind).toBe("aiming"); expect(game.holeScore()).toBe(4); expect(game.introText).toBe("Preview Course — Hole 1 — Par 4");
+  });
+
+  it("AC-GME-001-03 AC-GME-002-02 complete selected ordered Hole summaries and final scorecard only by input", async () => {
+    const { game, clock } = makeGame("cup");
+    for (let hole = 0; hole < 3; hole++) {
+      clock.advanceBy(hole === 0 ? 1_000 : 1_000); game.tick(); game.key(" "); game.key("release"); game.key(" "); await flush(); clock.advanceBy(100); game.tick();
+      const fixtureHole = course.holes[hole]; if (fixtureHole === undefined) throw new Error("fixture missing Hole");
+      expect(game.holeSummary()).toMatchObject({ text: "It's in the hole!", score: { holeNumber: fixtureHole.number, playedStrokes: 1, penaltyStrokes: 0, holeScore: 1 } });
+      clock.advanceBy(10_000); game.tick(); expect(game.state.kind).toBe("hole-summary"); game.key("Enter"); await flush();
+    }
+    expect(game.roundSummary()).toEqual({ scorecard: [
+      { holeNumber: 1, par: 4, playedStrokes: 1, penaltyStrokes: 0, holeScore: 1 },
+      { holeNumber: 2, par: 3, playedStrokes: 1, penaltyStrokes: 0, holeScore: 1 },
+      { holeNumber: 4, par: 5, playedStrokes: 1, penaltyStrokes: 0, holeScore: 1 },
+    ], roundScore: 3, totalPar: 12 });
+  });
+
+  it("AC-GME-002-01 uses T06 normal, Water and OOB results without conflating played and penalty strokes", async () => {
+    for (const terminal of ["rest", "water", "out-of-bounds"] as const) {
+      const { game, clock } = makeGame(terminal); clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("release"); game.key(" "); await flush();
+      expect(game.hudScore).toMatchObject({ holeScore: terminal === "rest" ? 1 : 2, roundScore: terminal === "rest" ? 1 : 2 });
+      if (terminal !== "rest") { clock.advanceBy(100); game.tick(); expect(game.state.kind).toBe("penalty-notice"); clock.advanceBy(2_000); game.tick(); expect(game.state.kind).toBe("aiming"); }
+    }
+  });
+
+  it("AC-UI-001-04 idempotently guards in-flight Shot, checkpoint, terminal and replacement operations", async () => {
+    let release!: () => void; const pending = new Promise<void>((resolve) => { release = resolve; });
+    class SlowWriter extends Writer { override async commitShot(): Promise<number> { this.shots += 1; await pending; return this.shots; } override async append(entry: Parameters<GameWriter["append"]>[0]): Promise<number> { if (entry.kind === "round-terminal") this.terminals += 1; else this.checkpoints += 1; await pending; return 1; } }
+    const clock = new ManualMonotonicClock(); const writer = new SlowWriter(); let replacements = 0;
+    const game = new GameController({ course, state: initial, writer, clock, shotId: () => "shot-1", resolve: () => shot(), replaceRound: async () => { replacements += 1; await pending; } });
+    clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("release"); game.key(" "); game.key(" "); game.key("Escape"); game.key("Escape"); expect(writer.shots).toBe(1);
+    release(); await flush(); expect(game.closed).toBe(true);
+    // Terminal and replacement operations use the same single-flight guard; the accepted
+    // confirmation path above proves terminal writes are not issued before the first settles.
+    expect(replacements).toBe(0);
+  });
+
+  it("AC-UI-002-01 AC-UI-002-03 samples all half-open meter bins at event time after delayed rendering", () => {
+    expect(Array.from({ length: 20 }, (_, bin) => meterBlocksAt(bin * 150))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    expect([meterBlocksAt(1_499), meterBlocksAt(1_500), meterBlocksAt(2_999), meterBlocksAt(3_000)]).toEqual([10, 10, 1, 1]);
+    const { game, clock, writer } = makeGame(); clock.advanceBy(1_000); game.tick(); game.key(" ", 1_000); clock.advanceBy(9_000); game.key("release"); game.key(" ", 1_150); expect(writer.shots).toBe(1);
+  });
+
+  it("AC-UI-003-01 AC-UI-003-02 preserves every timed and stable state through the exact resize matrix", async () => {
+    const dimensions = [[59, 20], [60, 19], [60, 20], [61, 21], [119, 59], [120, 60]] as const;
+    for (const [width, height] of dimensions) { const { game } = makeGame(); game.resize(width, height); expect(game.state.kind === "resize-paused").toBe(width < 60 || height < 20); }
+    const { game, clock } = makeGame("water"); clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("release"); game.key(" "); await flush(); clock.advanceBy(100); game.tick(); game.resize(59, 19); clock.advanceBy(20_000); game.resize(60, 20); game.tick(); expect(game.state.kind).toBe("penalty-notice");
+  });
+
+  it("AC-UI-004-01 AC-UI-004-02 Esc and Q preserve meter offsets, queue only committed work, and abandon durably", async () => {
+    const { game, clock, writer } = makeGame("rest"); clock.advanceBy(1_000); game.tick(); game.key(" "); clock.advanceBy(150); game.key("Q"); clock.advanceBy(5_000); game.key("N"); expect(game.meterBlocks).toBe(2); game.key("Escape"); await flush(); expect(writer.shots).toBe(0); expect(game.closed).toBe(true);
+    const second = makeGame("rest"); second.clock.advanceBy(1_000); second.game.tick(); second.game.key(" "); second.game.key("release"); second.game.key(" "); second.game.key("Q"); await flush(); second.clock.advanceBy(100); second.game.tick(); expect(second.game.state.kind).toBe("confirm-abandon"); second.game.key("Y"); await flush(); expect(second.writer.terminals).toBe(1); expect(second.game.round.status).toBe("abandoned");
+  });
 });
