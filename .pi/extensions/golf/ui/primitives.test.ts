@@ -1,54 +1,80 @@
 import { describe, expect, it } from "vitest";
 
-import { OVERLAY_RENDERING, TERRAIN_RENDERING, VIEWPORT, parseShotDirectionIndex } from "../domain/index.ts";
-import { projectTarget } from "../simulation/index.ts";
+import { parseShotDirectionIndex } from "../domain/index.ts";
+import { projectTarget, resolveShot } from "../simulation/index.ts";
 import { goalMarkerForShotOrigin, predictionMarkers, type MarkerKind, type RenderMarker } from "./rendering-model.ts";
 import { MARKER_RENDERING_CONTRACT, cropTerrainTiles, markerGlyph, renderCroppedTerrainRow, renderMarkerTile, renderTerrainRow, renderTerrainTile, selectVisibleMarker, visibleWidth } from "./primitives.ts";
 
 const reset = "\u001b[0m";
 const point = { x: 1, y: 1 };
-const marker = (kind: MarkerKind): RenderMarker => ({ kind, point });
+const marker = (kind: MarkerKind, markerPoint = point): RenderMarker => ({ kind, point: markerPoint });
+
+const terrainSnapshots = [
+  ["green", "\u001b[38;2;166;218;149m⠁⠈\u001b[0m"],
+  ["fairway", "\u001b[38;2;166;218;149m⠒⠒\u001b[0m"],
+  ["rough", "\u001b[38;2;166;218;149m⣶⣶\u001b[0m"],
+  ["bunker", "\u001b[38;2;238;212;159m⠶⠶\u001b[0m"],
+  ["water", "\u001b[38;2;138;173;244m⠛⣤\u001b[0m"],
+] as const;
+
+const markerSnapshots = [
+  ["ball", "\u001b[38;2;244;219;214m● \u001b[0m"],
+  ["cup", "\u001b[38;2;202;211;245m○ \u001b[0m"],
+  ["flag", "\u001b[38;2;237;135;150m⚑ \u001b[0m"],
+  ["target", "\u001b[38;2;237;135;150m╳ \u001b[0m"],
+  ["path", "\u001b[38;2;147;154;183m· \u001b[0m"],
+  ["boundary", "\u001b[38;2;91;96;120m× \u001b[0m"],
+  ["offscreen-arrow", "\u001b[38;2;245;169;127m↑ \u001b[0m"],
+] as const satisfies readonly [MarkerKind, string][];
 
 describe("V2-REN rendering primitives", () => {
-  it("AC-REN-001-01 snapshots exact two-column Terrain glyphs, direct colors, default background, and row reset", () => {
-    for (const terrain of Object.keys(TERRAIN_RENDERING) as (keyof typeof TERRAIN_RENDERING)[]) {
-      const spec = TERRAIN_RENDERING[terrain];
+  it("AC-REN-001-01 snapshots fixed PRD Terrain glyphs, colors, two-column width, default background, and row reset", () => {
+    for (const [terrain, expected] of terrainSnapshots) {
       const tile = renderTerrainTile(terrain);
-      expect(tile).toBe(`\u001b[38;2;${Number.parseInt(spec.color.slice(1, 3), 16)};${Number.parseInt(spec.color.slice(3, 5), 16)};${Number.parseInt(spec.color.slice(5, 7), 16)}m${spec.tile}${reset}`);
-      expect(visibleWidth(tile)).toBe(VIEWPORT.columnsPerCourseUnit);
+      expect(tile).toBe(expected);
+      expect(visibleWidth(tile)).toBe(2);
       expect(tile).not.toContain("48;");
     }
-    expect(renderTerrainRow(["green"])).toBe(`${renderTerrainTile("green")}${reset}`);
+    expect(renderTerrainRow(["green"])).toBe("\u001b[38;2;166;218;149m⠁⠈\u001b[0m\u001b[0m");
   });
 
   it("AC-REN-001-02 snapshots exact unstyled OOB tiles and reset Boundary transitions", () => {
     expect(renderTerrainTile("out-of-bounds")).toBe("  ");
     const row = renderTerrainRow(["green", "out-of-bounds", "water", "out-of-bounds"]);
-    expect(row).toBe(`${renderTerrainTile("green")}  ${renderTerrainTile("water") }  ${reset}`);
+    expect(row).toBe("\u001b[38;2;166;218;149m⠁⠈\u001b[0m  \u001b[38;2;138;173;244m⠛⣤\u001b[0m  \u001b[0m");
     expect(visibleWidth(row)).toBe(8);
   });
 
   it("AC-REN-001-03 distinguishes every Terrain solely by its fixed pattern", () => {
-    const patterns = Object.values(TERRAIN_RENDERING).map(({ tile }) => tile);
+    const patterns = terrainSnapshots.map(([, snapshot]) => snapshot.slice(snapshot.indexOf("m") + 1, -reset.length));
     expect(new Set(patterns).size).toBe(patterns.length);
     expect(patterns).toEqual(["⠁⠈", "⠒⠒", "⣶⣶", "⠶⠶", "⠛⣤"]);
   });
 
-  it("AC-REN-002-01 snapshots marker glyph/color, Flag/Cup origin switching, and active hidden Cup", () => {
+  it("AC-REN-002-01 snapshots fixed PRD marker glyphs/colors, switches Flag/Cup, and keeps hidden Cup capture active", () => {
     expect(goalMarkerForShotOrigin("fairway")).toBe("flag");
     expect(goalMarkerForShotOrigin("green")).toBe("cup");
     expect(goalMarkerForShotOrigin("rough")).toBe("flag");
-    // The Cup marker still exists mechanically while Flag is the selected display.
-    const hiddenCup = marker("cup");
-    expect(hiddenCup.kind).toBe("cup");
-    for (const kind of MARKER_RENDERING_CONTRACT) {
+    for (const [kind, expected] of markerSnapshots) {
       const rendered = renderMarkerTile(marker(kind));
-      const color = kind === "boundary" ? OVERLAY_RENDERING.courseBoundary.color : kind === "offscreen-arrow" ? OVERLAY_RENDERING.offScreenArrow.color : OVERLAY_RENDERING[kind].color;
-      const rgb = [color.slice(1, 3), color.slice(3, 5), color.slice(5, 7)].map((part) => Number.parseInt(part, 16));
-      expect(rendered).toBe(`\u001b[38;2;${rgb.join(";")}m${markerGlyph(marker(kind))} ${reset}`);
+      expect(rendered).toBe(expected);
       expect(visibleWidth(rendered)).toBe(2);
     }
     expect(["up", "down", "left", "right", "up-left", "up-right", "down-left", "down-right"].map((arrow) => markerGlyph({ ...marker("offscreen-arrow"), arrow: arrow as "up" | "down" | "left" | "right" | "up-left" | "up-right" | "down-left" | "down-right" }))).toEqual(["↑", "↓", "←", "→", "↖", "↗", "↙", "↘"]);
+
+    // This fairway-origin Shot displays Flag, but resolveShot receives only the authoritative Cup.
+    const hiddenCup = { x: 0.55, y: 0 };
+    expect(renderMarkerTile(marker(goalMarkerForShotOrigin("fairway"), hiddenCup))).toBe("\u001b[38;2;237;135;150m⚑ \u001b[0m");
+    const captured = resolveShot({
+      shotId: "hidden-cup-capture",
+      round: { lie: { x: 0, y: 0 }, playedStrokes: 0, penaltyStrokes: 0, selectedClub: "putter", directionIndex: 0 as never },
+      power: 0.1,
+      originalLieTerrain: "fairway",
+      cup: hiddenCup,
+      terrainAt: () => "green",
+      courseBoundarySweep: () => null,
+    });
+    expect(captured.terminal).toBe("cup");
   });
 
   it("AC-REN-002-02 renders prediction only while aiming from the shared simulation Target projection", () => {
@@ -61,11 +87,21 @@ describe("V2-REN rendering primitives", () => {
     expect(prediction.at(-1)?.point).toBe(target.position);
   });
 
-  it("AC-REN-002-03 keeps Boundary, OOB Target, and transient OOB Ball width-safe and reset", () => {
-    for (const item of [marker("boundary"), marker("target"), marker("ball")]) {
+  it("AC-REN-002-03 renders Boundary, outside-boundary Target, and transient OOB Ball fixtures width-safe without ANSI leakage", () => {
+    const boundary = marker("boundary", { x: 60, y: 12 });
+    const outsideBoundaryTarget = marker("target", { x: 60.25, y: -1 });
+    const transientOobBall = marker("ball", { x: -0.25, y: 60.5 });
+    const fixtures = [
+      [boundary, "\u001b[38;2;91;96;120m× \u001b[0m"],
+      [outsideBoundaryTarget, "\u001b[38;2;237;135;150m╳ \u001b[0m"],
+      [transientOobBall, "\u001b[38;2;244;219;214m● \u001b[0m"],
+    ] as const;
+    for (const [item, expected] of fixtures) {
       const rendered = renderMarkerTile(item);
+      expect(rendered).toBe(expected);
       expect(visibleWidth(rendered)).toBe(2);
       expect(rendered.endsWith(reset)).toBe(true);
+      expect(rendered).not.toContain("48;");
     }
   });
 
@@ -76,7 +112,7 @@ describe("V2-REN rendering primitives", () => {
         expect(selectVisibleMarker([marker(high), marker(low)])?.kind).toBe(high);
       }
     }
-    expect(selectVisibleMarker(MARKER_RENDERING_CONTRACT.slice().reverse().map(marker))?.kind).toBe("ball");
+    expect(selectVisibleMarker(MARKER_RENDERING_CONTRACT.slice().reverse().map((kind) => marker(kind)))?.kind).toBe("ball");
   });
 
   it("AC-REN-004-01 computes styled and unstyled equal visible widths", () => {
