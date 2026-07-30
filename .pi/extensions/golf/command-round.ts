@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, sliceByColumn, type Component, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, isKeyRepeat, matchesKey, sliceByColumn, type Component, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 import { createRoundCourseSnapshot } from "./course-loader/snapshot.ts";
 import { captureSelectedCourseSnapshot, formatCourseLoadIssue, OUT_OF_BOUNDS, PREVIEW_COURSE_SOURCE, readStableCourseFile, terrainAtPoint } from "./course-loader/index.ts";
@@ -74,6 +74,13 @@ function keyName(data: string): string | null {
   if (data === "n" || data === "N") return "N";
   if (data === "h" || data === "H") return "H";
   return null;
+}
+
+/** Maps raw Pi input while preserving Kitty repeat/release semantics for T10. */
+export function mapPiGolfKeyInput(data: string): { readonly key: string; readonly repeat: boolean } | null {
+  if (isKeyRelease(data)) return null;
+  const key = keyName(data);
+  return key === null ? null : { key, repeat: isKeyRepeat(data) };
 }
 
 function centerLine(text: string, width: number): string {
@@ -215,9 +222,15 @@ export class GolfRoundComponent implements Component {
     return summary === null ? [] : ["Round complete", ...summary.scorecard.map((line) => `Hole ${line.holeNumber} · Par ${line.par} · Hole Score ${line.holeScore}`), `Round Score ${summary.roundScore} · Total Par ${summary.totalPar}`, "R new Round · Esc save and close"];
   }
 
+  // The pinned Pi TUI Component contract dispatches focused raw terminal bytes here.
   handleInput(data: string): void {
-    const key = keyName(data);
-    if (key !== null) this.game.key(key);
+    const input = mapPiGolfKeyInput(data);
+    if (input !== null) this.deliverKey(input.key, input.repeat);
+    else this.tui.requestRender();
+  }
+
+  private deliverKey(key: string, repeat: boolean): void {
+    this.game.key(key, undefined, repeat);
     this.tui.requestRender();
     if (this.game.closed) void this.closeAfterDurability();
   }
