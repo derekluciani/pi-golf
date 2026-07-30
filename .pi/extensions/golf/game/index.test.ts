@@ -292,4 +292,79 @@ describe("V2-T10 FSM and game component", () => {
   });
 
 
+  it("AC-UI-001-02 AC-UI-001-03 table-drives all nine base states plus resize-paused and rejects every non-accepted key without effects", async () => {
+    const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Tab", " ", "Enter", "Escape", "Q", "R", "Y", "N", "H", "unmapped"] as const;
+    const accepted = {
+      intro: ["H"], aiming: ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Tab", " ", "Enter", "Escape", "Q", "H"],
+      metering: [" ", "Enter", "Escape", "Q", "H"], committing: ["Escape", "H"], playback: ["Escape", "Q", "H"],
+      "penalty-notice": ["Escape", "Q", "H"], "hole-summary": [" ", "Enter", "Escape", "H"], "round-summary": ["Escape", "R", "H"],
+      "confirm-abandon": ["Y", "Enter", "N", "Escape", "H"], "resize-paused": [],
+    } as const;
+    const makeSummary = async (): Promise<{ game: GameController; clock: ManualMonotonicClock; writer: Writer }> => {
+      const fixture = makeGame("cup");
+      for (let hole = 0; hole < course.holes.length; hole += 1) {
+        fixture.clock.advanceBy(1_000); fixture.game.tick(); fixture.game.key(" "); fixture.game.key("Enter", fixture.clock.now() + 150); await fixture.game.whenIdle();
+        fixture.clock.advanceBy(1_000); fixture.game.tick(); expect(fixture.game.state.kind).toBe("hole-summary"); fixture.game.key("Enter"); await fixture.game.whenIdle();
+      }
+      expect(fixture.game.state.kind).toBe("round-summary"); return fixture;
+    };
+    const intro = makeGame();
+    const aiming = makeGame(); aiming.clock.advanceBy(1_000); aiming.game.tick();
+    const metering = makeGame(); metering.clock.advanceBy(1_000); metering.game.tick(); metering.game.key(" ");
+    const playback = makeGame(); playback.clock.advanceBy(1_000); playback.game.tick(); playback.game.key(" "); playback.game.key("Enter", playback.clock.now() + 150); await playback.game.whenIdle();
+    const notice = makeGame("water"); notice.clock.advanceBy(1_000); notice.game.tick(); notice.game.key(" "); notice.game.key("Enter", notice.clock.now() + 150); await notice.game.whenIdle(); notice.clock.advanceBy(100); notice.game.tick();
+    const hole = makeGame("cup"); hole.clock.advanceBy(1_000); hole.game.tick(); hole.game.key(" "); hole.game.key("Enter", hole.clock.now() + 150); await hole.game.whenIdle(); hole.clock.advanceBy(1_000); hole.game.tick();
+    const summary = await makeSummary();
+    const confirmation = makeGame(); confirmation.clock.advanceBy(1_000); confirmation.game.tick(); confirmation.game.key("Q");
+    const paused = makeGame(); paused.game.resize(59, 19);
+    class PendingWriter extends Writer { override async commitShot(): Promise<number> { this.shots += 1; return new Promise<number>(() => {}); } }
+    const committingClock = new ManualMonotonicClock(); const committingWriter = new PendingWriter(); const committing = new GameController({ course, state: initial, writer: committingWriter, clock: committingClock, shotId: () => "shot-1", resolve: (power) => { const resolved = shot(); return { ...resolved, inputs: { ...resolved.inputs, power } }; }, presentation: presentation(committingClock) });
+    committingClock.advanceBy(1_000); committing.tick(); committing.key(" "); committing.key("Enter", committingClock.now() + 150);
+    const committingFixture = { game: committing, clock: committingClock, writer: committingWriter };
+    const cases = [intro, aiming, metering, committingFixture, playback, notice, hole, summary, confirmation, paused] as const;
+    expect(cases.map((fixture) => fixture.game.state.kind)).toEqual([...GAME_BASE_STATES, "resize-paused"]);
+    for (const fixture of cases) {
+      const state = fixture.game.state.kind; const beforeState = structuredClone(fixture.game.state); const beforeRound = structuredClone(fixture.game.round); const beforeWrites = [fixture.writer.shots, fixture.writer.checkpoints, fixture.writer.terminals];
+      for (const key of keys.filter((candidate) => !(accepted[state] as readonly string[]).includes(candidate))) fixture.game.key(key, fixture.clock.now(), true);
+      expect(fixture.game.state).toEqual(beforeState); expect(fixture.game.round).toEqual(beforeRound); expect([fixture.writer.shots, fixture.writer.checkpoints, fixture.writer.terminals]).toEqual(beforeWrites);
+    }
+  });
+
+  it("AC-UI-003-01 AC-UI-003-02 restores a real Round summary unchanged after undersized allocation", async () => {
+    const { game, clock, writer } = await (async () => {
+      const fixture = makeGame("cup");
+      for (let hole = 0; hole < course.holes.length; hole += 1) {
+        fixture.clock.advanceBy(1_000); fixture.game.tick(); fixture.game.key(" "); fixture.game.key("Enter", fixture.clock.now() + 150); await fixture.game.whenIdle(); fixture.clock.advanceBy(1_000); fixture.game.tick(); fixture.game.key("Enter"); await fixture.game.whenIdle();
+      }
+      return fixture;
+    })();
+    const canonical = structuredClone(game.round); const summary = structuredClone(game.state);
+    expect(summary).toEqual({ kind: "round-summary" });
+    game.resize(59, 19); expect(game.state).toEqual({ kind: "resize-paused", suspended: summary });
+    clock.advanceBy(30_000); game.resize(60, 20);
+    expect(game.state).toEqual(summary); expect(game.round).toEqual(canonical); expect([writer.shots, writer.checkpoints, writer.terminals]).toEqual([3, 2, 0]);
+    game.key("Escape"); await game.whenIdle(); expect(writer.terminals).toBe(1); expect(game.closed).toBe(true);
+  });
+
+  it("AC-GME-001-03 AC-UI-004-01 appends exactly one durable complete terminal from a real Round summary and leaves no active recovery", async () => {
+    const { root, store, snapshot, recovered } = await durableFixture();
+    try {
+      const clock = new ManualMonotonicClock(); const writer = await RoundMutationWriter.forSession(store, "session-a", "round-a", recovered.revision); let current = recovered.state; let shotNumber = 0; let activeShotId = "";
+      const resolve = (power: number): ResolvedShot => {
+        const currentHole = snapshot.course.holes[current.currentHoleIndex]; if (currentHole === undefined) throw new Error("Missing current Hole.");
+        const base = shot("cup"); return { ...base, shotId: activeShotId, preShotLie: current.lie, inputs: { club: current.selectedClub, directionIndex: current.shotDirectionIndex, power }, landingPosition: currentHole.cup, finalPosition: currentHole.cup, resultingRound: { ...base.resultingRound, lie: currentHole.cup, selectedClub: current.selectedClub, directionIndex: current.shotDirectionIndex } };
+      };
+      const game = new GameController({ course: snapshot.course, state: recovered.state, writer, clock, shotId: () => { activeShotId = `cup-${shotNumber}`; shotNumber += 1; return activeShotId; }, resolve, presentation: { camera: new CameraController(clock, recovered.state.lie, snapshot.course.holes[0]?.cup ?? recovered.state.lie), target: () => snapshot.course.holes[0]?.cup ?? recovered.state.lie } });
+      clock.advanceBy(1_000); game.tick();
+      for (let index = 0; index < snapshot.course.holes.length; index += 1) {
+        game.key(" "); game.key("Enter", clock.now() + 150); await game.whenIdle(); clock.advanceBy(1_000); game.tick(); expect(game.state.kind).toBe("hole-summary"); game.key("Enter"); await game.whenIdle(); current = game.round;
+        if (index < snapshot.course.holes.length - 1) { clock.advanceBy(1_000); game.tick(); }
+      }
+      expect(game.state.kind).toBe("round-summary"); game.key("Escape"); game.key("Escape"); await game.whenIdle(); await flushDurable();
+      const entries = (await readFile(store.pathFor("round-a"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { kind: string });
+      expect(entries.filter((entry) => entry.kind === "round-terminal")).toHaveLength(1);
+      expect(await store.read("round-a")).toMatchObject({ terminal: true, lifecycle: "round-summary", state: { status: "complete" } });
+      expect(await store.findByBranch("session-a")).toEqual([]); expect(game.closed).toBe(true);
+    } finally { await rm(root, { recursive: true }); }
+  });
 });
