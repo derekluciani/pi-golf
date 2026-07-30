@@ -52,6 +52,8 @@ export interface RoundReplacement {
   readonly successorSnapshot: RoundCourseSnapshot;
   readonly successorState: PersistedRoundState;
   readonly branchId: string;
+  /** The successor has its own T09 revision authority; never retain the predecessor writer. */
+  readonly successorWriter: (successor: ReconstructedRound) => Promise<GameWriter>;
 }
 export interface GameControllerOptions {
   readonly course: Course;
@@ -93,7 +95,7 @@ export class GameController {
   #commitPromise: Promise<void> | null = null; #advancePromise: Promise<void> | null = null;
   #checkpointPromise: Promise<void> | null = null; #terminalPromise: Promise<void> | null = null; #replacementPromise: Promise<void> | null = null;
   #deferredCommit: { readonly state: Extract<GameBaseState, { readonly kind: "committing" }>; readonly error: boolean } | null = null;
-  #course: Course; readonly #writer: GameWriter; readonly #clock: MonotonicClock; readonly #shotId: () => string;
+  #course: Course; #writer: GameWriter; readonly #clock: MonotonicClock; readonly #shotId: () => string;
   readonly #resolve: (power: Power) => ResolvedShot; readonly #replacement: RoundReplacement | undefined; readonly #presentation: GamePresentation;
   #playback: ResolvedShotPlayback | null = null;
 
@@ -107,6 +109,8 @@ export class GameController {
   }
   get state(): GameState { return this.#suspended ? { kind: "resize-paused", suspended: this.#base } : this.#base; }
   get round(): PersistedRoundState { return this.#round; }
+  /** Awaits operations already accepted by this controller; useful for orderly shutdown and deterministic hosts. */
+  async whenIdle(): Promise<void> { await Promise.all([this.#commitPromise, this.#advancePromise, this.#checkpointPromise, this.#terminalPromise, this.#replacementPromise].filter((work): work is Promise<void> => work !== null)); }
   get closed(): boolean { return this.#closed; }
   get hudVisible(): boolean { return this.#hudVisible; }
   get meterBlocks(): number { return this.#base.kind === "metering" ? meterBlocksAt(this.now() - this.#base.beganAt) : POWER_METER.minimumBlocks; }
@@ -233,9 +237,11 @@ export class GameController {
   private replace(): void {
     if (this.#replacementPromise !== null || this.#replacement === undefined || this.#base.kind !== "round-summary") return;
     const replacement = this.#replacement;
-    const work = replacement.store.read(replacement.predecessorRoundId).then((authoritative) => appendRoundReplacement(replacement.store, { ...replacement, predecessorRevision: authoritative.revision })).then((successor) => {
+    const work = replacement.store.read(replacement.predecessorRoundId).then((authoritative) => appendRoundReplacement(replacement.store, { ...replacement, predecessorRevision: authoritative.revision })).then(async (successor) => {
       if (this.#base.kind !== "round-summary" || successor.state.status !== "active" || successor.terminal) throw new Error("Replacement did not produce an active successor.");
-      this.#course = replacement.successorSnapshot.course; this.#round = successor.state; this.#played = successor.currentHolePlayedStrokes; this.#penalties = successor.currentHolePenaltyStrokes;
+      const successorWriter = await replacement.successorWriter(successor);
+      // The next Shot must append to the successor's authoritative revision, not its replaced predecessor.
+      this.#writer = successorWriter; this.#course = replacement.successorSnapshot.course; this.#round = successor.state; this.#played = successor.currentHolePlayedStrokes; this.#penalties = successor.currentHolePenaltyStrokes;
       this.#base = { kind: "intro", beganAt: this.now() }; this.#presentation.camera.aim(this.#round.lie, this.#presentation.target());
     }).catch(() => { /* A retry retains the durable predecessor or reconciles its linked successor. */ }).finally(() => { this.#replacementPromise = null; }); this.#replacementPromise = work;
   }

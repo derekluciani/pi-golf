@@ -237,6 +237,47 @@ describe("V2-T10 FSM and game component", () => {
     const queued = makeGame(); queued.clock.advanceBy(1_000); queued.game.tick(); queued.game.key(" "); queued.game.key("Enter", queued.clock.now() + 150); await flush(); queued.game.key("Q"); queued.game.resize(59, 19); queued.clock.advanceBy(9_000); queued.game.resize(60, 20); expect(queued.game.state.kind).toBe("playback"); queued.clock.advanceBy(100); queued.game.tick(); expect(queued.game.state.kind).toBe("confirm-abandon");
   });
 
+  it("AC-GME-001-03 AC-UI-001-04 reaches a real Round summary, retries an interrupted R replacement once, and rebinds T09 authority", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-golf-game-replacement-"));
+    let interruptSuccessor = false; let openWrites = 0;
+    const store = new RoundStore({ root: join(root, ".pi/golf/rounds"), beforeWrite: (boundary) => {
+      if (interruptSuccessor && boundary === "open" && ++openWrites === 2) throw new Error("interrupt-successor-open");
+    } });
+    try {
+      const serializedCourse = await readFile(new URL("../courses/preview-course.json", import.meta.url), "utf8"); const parsed = parseCourseJson(serializedCourse);
+      if (!parsed.ok) throw new Error("Preview Course fixture must be valid.");
+      const snapshot = { course: parsed.value, serializedCourse } as const; const initialState = newRoundState(snapshot);
+      const started = await appendRoundStart(store, { roundId: "round-a", snapshot, state: initialState, branchId: "session-a" });
+      const clock = new ManualMonotonicClock(); const writer = await RoundMutationWriter.forSession(store, "session-a", "round-a", started.revision); let resolvingRound = started.state;
+      const resolve = (power: number): ResolvedShot => {
+        const current = resolvingRound; const currentHole = snapshot.course.holes[current.currentHoleIndex];
+        if (currentHole === undefined) throw new Error("Current Preview Hole is missing.");
+        const resolved = shot("cup");
+        return { ...resolved, shotId: `cup-${current.currentHoleIndex + 1}`, preShotLie: current.lie, inputs: { club: current.selectedClub, directionIndex: current.shotDirectionIndex, power }, landingPosition: currentHole.cup, finalPosition: currentHole.cup, resultingRound: { ...resolved.resultingRound, lie: currentHole.cup, selectedClub: current.selectedClub, directionIndex: current.shotDirectionIndex } };
+      };
+      const game = new GameController({ course: snapshot.course, state: started.state, writer, clock, shotId: () => `cup-${resolvingRound.currentHoleIndex + 1}`, resolve, presentation: { camera: new CameraController(clock, initialState.lie, snapshot.course.holes[0]?.cup ?? initialState.lie), target: () => snapshot.course.holes[0]?.cup ?? initialState.lie }, replacement: {
+        store, predecessorRoundId: "round-a", predecessorRevision: 0, successorRoundId: "round-b", successorSnapshot: snapshot, successorState: initialState, branchId: "session-a",
+        successorWriter: async (successor) => RoundMutationWriter.forSession(store, "session-a", successor.roundId, successor.revision),
+      } });
+      clock.advanceBy(1_000); game.tick();
+      for (let index = 0; index < snapshot.course.holes.length; index += 1) {
+        game.key(" "); game.key("Enter", clock.now() + 150); await game.whenIdle(); clock.advanceBy(1_000); game.tick();
+        expect(game.state.kind).toBe("hole-summary"); game.key("Enter"); await game.whenIdle(); resolvingRound = game.round;
+        if (index < snapshot.course.holes.length - 1) { clock.advanceBy(1_000); game.tick(); expect(game.state.kind).toBe("aiming"); }
+      }
+      expect(game.state.kind).toBe("round-summary"); expect((await store.read("round-a")).revision).toBe(5);
+      interruptSuccessor = true; game.key("R"); await game.whenIdle();
+      expect(game.state.kind).toBe("round-summary"); expect(await store.read("round-a")).toMatchObject({ revision: 6, replacement: "round-b", terminal: true }); expect(await store.hasRound("round-b")).toBe(false);
+      interruptSuccessor = false; game.key("R"); game.key("R"); await game.whenIdle();
+      expect(game.state.kind).toBe("intro"); expect(game.round).toEqual(initialState); expect((await store.read("round-a")).revision).toBe(6); expect(await store.read("round-b")).toMatchObject({ revision: 0, terminal: false });
+      const predecessorKinds = (await readFile(store.pathFor("round-a"), "utf8")).trim().split("\n").map((line) => (JSON.parse(line) as { kind: string }).kind);
+      const successorKinds = (await readFile(store.pathFor("round-b"), "utf8")).trim().split("\n").map((line) => (JSON.parse(line) as { kind: string }).kind);
+      expect(predecessorKinds).toEqual(["round-start", "shot", "checkpoint", "shot", "checkpoint", "shot", "round-replacement"]); expect(successorKinds).toEqual(["round-start"]);
+      resolvingRound = initialState; clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("Enter", clock.now() + 150); await game.whenIdle();
+      expect((await store.read("round-a")).revision).toBe(6); expect((await store.read("round-b")).revision).toBe(1);
+    } finally { await rm(root, { recursive: true }); }
+  });
+
   it("AC-GME-001-03 AC-UI-004-01 persists a reached Hole summary before Esc closes it", async () => {
     const { root, store, snapshot, recovered } = await durableFixture();
     try {
