@@ -17,6 +17,11 @@ export interface LoadedCourseFile { readonly course: Course; readonly sourcePath
 export type CourseFileLoadResult = { readonly ok: true; readonly value: LoadedCourseFile } | { readonly ok: false; readonly issue: CourseLoadIssue };
 export interface CourseDiscoveryResult { readonly courses: readonly LoadedCourseFile[]; readonly warnings: readonly CourseLoadIssue[]; }
 
+/** Test-only seam for deterministic replacement checks between descriptor fstats. */
+export interface StableCourseReadHooks {
+  readonly afterPreRead?: (sourcePath: string, attempt: number) => Promise<void> | void;
+}
+
 function issue(code: CourseLoadIssueCode, sourcePath: string, message: string, diagnostics: readonly CourseDiagnostic[] = [], warnings: readonly CourseWarning[] = []): CourseLoadIssue { return { code, sourcePath, message, diagnostics, warnings }; }
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
 function sameMetadata(left: Stats, right: Stats): boolean { return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs && left.mode === right.mode; }
@@ -26,16 +31,18 @@ function sameMetadata(left: Stats, right: Stats): boolean { return left.dev === 
  * resolution check.  The buffer is sized from the pre-read fstat, so a writer
  * which grows a file can never make this reader allocate past the Course limit.
  */
-export async function readStableCourseFile(path: string): Promise<{ readonly ok: true; readonly sourcePath: string; readonly bytes: Uint8Array } | { readonly ok: false; readonly issue: CourseLoadIssue }> {
-  let sourcePath: string;
-  try { sourcePath = await realpath(path); } catch { return { ok: false, issue: issue("unreadable-course", resolve(path), `Cannot canonicalize Course file: ${resolve(path)}`) }; }
+export async function readStableCourseFile(path: string, hooks: StableCourseReadHooks = {}): Promise<{ readonly ok: true; readonly sourcePath: string; readonly bytes: Uint8Array } | { readonly ok: false; readonly issue: CourseLoadIssue }> {
+  let lastSourcePath = resolve(path);
   for (let attempt = 0; attempt < MAX_STABLE_READ_RETRIES; attempt += 1) {
+    let sourcePath: string;
+    try { sourcePath = await realpath(path); lastSourcePath = sourcePath; } catch { return { ok: false, issue: issue("unreadable-course", resolve(path), `Cannot canonicalize Course file: ${resolve(path)}`) }; }
     let handle: Awaited<ReturnType<typeof open>>;
     try { handle = await open(sourcePath, "r"); } catch { return { ok: false, issue: issue("unreadable-course", sourcePath, `Cannot read Course file: ${sourcePath}`) }; }
     try {
       const before = await handle.stat();
       if (!before.isFile()) return { ok: false, issue: issue("not-regular-course", sourcePath, `Course source is not a regular file: ${sourcePath}`) };
       if (before.size > MAX_COURSE_JSON_BYTES) return { ok: false, issue: issue("too-large-course", sourcePath, `Course JSON exceeds ${MAX_COURSE_JSON_BYTES} bytes: ${sourcePath}`) };
+      await hooks.afterPreRead?.(sourcePath, attempt);
       const bytes = Buffer.alloc(before.size);
       let offset = 0;
       while (offset < bytes.byteLength) {
@@ -54,7 +61,7 @@ export async function readStableCourseFile(path: string): Promise<{ readonly ok:
       return { ok: false, issue: issue("unreadable-course", sourcePath, `Cannot read Course file: ${sourcePath}`) };
     } finally { await handle.close().catch(() => undefined); }
   }
-  return { ok: false, issue: issue("unstable-course", sourcePath, `Course file changed while being read: ${sourcePath}`) };
+  return { ok: false, issue: issue("unstable-course", lastSourcePath, `Course file changed while being read: ${lastSourcePath}`) };
 }
 
 export async function loadCourseFile(path: string): Promise<CourseFileLoadResult> {

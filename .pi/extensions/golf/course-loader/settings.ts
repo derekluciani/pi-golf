@@ -45,6 +45,8 @@ export interface CourseSettingsReadResult {
 /** Testable interruption seam; production callers do not provide hooks. */
 export interface CourseSettingsWriteHooks {
   readonly beforeRename?: (temporaryPath: string) => Promise<void> | void;
+  /** Test-only post-commit seam representing interruption after rename and directory sync. */
+  readonly afterDurableCommit?: (settingsPath: string) => Promise<void> | void;
 }
 
 async function readBoundedFile(path: string, maximumBytes: number): Promise<Uint8Array> {
@@ -204,6 +206,7 @@ async function writeSettingsAtomically(settingsPath: string, settings: CourseSet
     const directory = await open(dirname(settingsPath), "r").catch(() => undefined);
     await directory?.sync().catch(() => undefined);
     await directory?.close().catch(() => undefined);
+    await hooks.afterDurableCommit?.(settingsPath);
   } finally {
     await temporaryFile?.close().catch(() => undefined);
     if (ownsTemporaryPath) await rm(temporaryPath, { force: true });
