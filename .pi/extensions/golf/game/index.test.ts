@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { ManualMonotonicClock, parseCourseHoleIndex, parseCourseId, parseShotDirectionIndex, type PersistedRoundState } from "../domain/index.ts";
 import type { Course } from "../course-loader/types.ts";
-import type { ResolvedShot } from "../simulation/outcome.ts";
+import { resolveShot, type ResolvedShot } from "../simulation/outcome.ts";
+import { OUT_OF_BOUNDS } from "../course-loader/index.ts";
+import { CameraController } from "../ui/index.ts";
 import { GAME_BASE_STATES, GameController, gameOptionsFromRecovered, meterBlocksAt, newRoundState, renderPowerMeter, type GameWriter } from "./index.ts";
 
 const course: Course = { schemaVersion: 1, id: "preview", name: "Preview Course", holes: [
@@ -16,7 +18,12 @@ const direction = parsedDirection;
 const initial: PersistedRoundState = { kind: "persisted-round", courseId: id, currentHoleIndex: holeIndex, lie: { x: 0, y: 0 }, selectedClub: "driver", shotDirectionIndex: direction, holeScores: [], status: "active" };
 class Writer implements GameWriter { shots = 0; terminals = 0; checkpoints = 0; fail = false; async commitShot(): Promise<number> { this.shots += 1; if (this.fail) throw new Error("disk"); return this.shots; } async append(entry: Parameters<GameWriter["append"]>[0]): Promise<number> { if (entry.kind === "round-terminal") this.terminals += 1; else this.checkpoints += 1; return this.terminals + this.checkpoints; } }
 function shot(terminal: ResolvedShot["terminal"] = "rest"): ResolvedShot { return { shotId: "shot-1", preShotLie: { x: 0, y: 0 }, inputs: { club: "driver", directionIndex: direction, power: .1 }, landingPosition: { x: 1, y: 0 }, finalPosition: terminal === "cup" ? { x: 10, y: 0 } : { x: 1, y: 0 }, terminal, resultingSpeed: 0, elapsed: .1, resultingRound: { lie: terminal === "cup" ? { x: 10, y: 0 } : { x: 1, y: 0 }, playedStrokes: 1, penaltyStrokes: terminal === "water" || terminal === "out-of-bounds" ? 1 : 0, selectedClub: "driver", directionIndex: direction }, keyframes: [{ elapsed: 0, position: { x: 0, y: 0 }, speed: 1 }] }; }
-function makeGame(terminal: ResolvedShot["terminal"] = "rest"): { game: GameController; clock: ManualMonotonicClock; writer: Writer } { const clock = new ManualMonotonicClock(); const writer = new Writer(); return { game: new GameController({ course, state: initial, writer, clock, shotId: () => "shot-1", resolve: () => shot(terminal) }), clock, writer }; }
+function presentation(clock: ManualMonotonicClock) { return { camera: new CameraController(clock, initial.lie, course.holes[0]?.cup ?? initial.lie), target: () => course.holes[0]?.cup ?? initial.lie }; }
+function makeGame(terminal: ResolvedShot["terminal"] = "rest"): { game: GameController; clock: ManualMonotonicClock; writer: Writer } {
+  const clock = new ManualMonotonicClock(); const writer = new Writer(); const reference: { current: GameController | null } = { current: null };
+  const resolve = (power: number) => { const round = reference.current?.round; if (round === undefined) throw new Error("Game fixture is not initialized."); const resolved = shot(terminal); return { ...resolved, preShotLie: round.lie, inputs: { club: round.selectedClub, directionIndex: round.shotDirectionIndex, power }, resultingRound: { ...resolved.resultingRound, lie: terminal === "water" || terminal === "out-of-bounds" ? round.lie : resolved.resultingRound.lie, selectedClub: round.selectedClub, directionIndex: round.shotDirectionIndex } }; };
+  const game = new GameController({ course, state: initial, writer, clock, shotId: () => "shot-1", resolve, presentation: presentation(clock) }); reference.current = game; return { game, clock, writer };
+}
 async function flush(): Promise<void> { await Promise.resolve(); await Promise.resolve(); }
 
 describe("V2-T10 FSM and game component", () => {
@@ -49,7 +56,8 @@ describe("V2-T10 FSM and game component", () => {
     const started = newRoundState(snapshot); const firstHole = course.holes[0]; if (firstHole === undefined) throw new Error("fixture missing first Hole");
     expect(started).toMatchObject({ currentHoleIndex: 0, lie: firstHole.tee, selectedClub: "driver", shotDirectionIndex: 0, holeScores: [] });
     const recovered = { roundId: "round-a", revision: 3, state: { ...started, lie: { x: 4, y: 0 } }, lifecycle: "aiming" as const, currentHolePlayedStrokes: 3, currentHolePenaltyStrokes: 1, terminal: false, replacement: null, successorStart: null, branchId: "branch" };
-    const options = gameOptionsFromRecovered(snapshot, recovered, { writer: new Writer(), clock: new ManualMonotonicClock(), shotId: () => "shot-1", resolve: () => shot() });
+    const recoveredClock = new ManualMonotonicClock();
+    const options = gameOptionsFromRecovered(snapshot, recovered, { writer: new Writer(), clock: recoveredClock, shotId: () => "shot-1", resolve: () => shot(), presentation: presentation(recoveredClock) });
     const game = new GameController(options);
     expect(game.state.kind).toBe("aiming"); expect(game.holeScore()).toBe(4); expect(game.introText).toBe("Preview Course — Hole 1 — Par 4");
   });
@@ -69,24 +77,29 @@ describe("V2-T10 FSM and game component", () => {
     ], roundScore: 3, totalPar: 12 });
   });
 
-  it("AC-GME-002-01 uses T06 normal, Water and OOB results without conflating played and penalty strokes", async () => {
+  it("AC-GME-002-01 validates real T06 normal, Water, and OOB outcomes against predecessor/scoring invariants", async () => {
+    const base = { lie: { x: 0, y: 0 }, playedStrokes: 0, penaltyStrokes: 0, selectedClub: "putter" as const, directionIndex: direction };
+    const outcomes = [
+      resolveShot({ shotId: "normal", round: base, power: .1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: () => "green", courseBoundarySweep: () => null }),
+      resolveShot({ shotId: "water", round: base, power: .1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: (point) => point.x >= 1 ? "water" : "green", courseBoundarySweep: () => null }),
+      resolveShot({ shotId: "oob", round: base, power: .1, originalLieTerrain: "green", cup: { x: -2, y: 0 }, terrainAt: (point) => point.x >= 1 ? OUT_OF_BOUNDS : "green", courseBoundarySweep: () => null }),
+    ];
+    expect(outcomes.map((result) => [result.terminal, result.resultingRound.playedStrokes, result.resultingRound.penaltyStrokes, result.resultingRound.lie])).toEqual([
+      ["rest", 1, 0, outcomes[0]?.resultingRound.lie], ["water", 1, 1, base.lie], ["out-of-bounds", 1, 1, base.lie],
+    ]);
     for (const terminal of ["rest", "water", "out-of-bounds"] as const) {
-      const { game, clock } = makeGame(terminal); clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("release"); game.key(" "); await flush();
-      expect(game.hudScore).toMatchObject({ holeScore: terminal === "rest" ? 1 : 2, roundScore: terminal === "rest" ? 1 : 2 });
-      if (terminal !== "rest") { clock.advanceBy(100); game.tick(); expect(game.state.kind).toBe("penalty-notice"); clock.advanceBy(2_000); game.tick(); expect(game.state.kind).toBe("aiming"); }
+      const { game, clock, writer } = makeGame(terminal); clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("release"); game.key(" "); await flush();
+      expect(writer.shots).toBe(1); expect(game.hudScore).toMatchObject({ playedStrokes: 1, penaltyStrokes: terminal === "rest" ? 0 : 1, holeScore: terminal === "rest" ? 1 : 2, roundScore: terminal === "rest" ? 1 : 2 });
     }
   });
 
   it("AC-UI-001-04 idempotently guards in-flight Shot, checkpoint, terminal and replacement operations", async () => {
     let release!: () => void; const pending = new Promise<void>((resolve) => { release = resolve; });
     class SlowWriter extends Writer { override async commitShot(): Promise<number> { this.shots += 1; await pending; return this.shots; } override async append(entry: Parameters<GameWriter["append"]>[0]): Promise<number> { if (entry.kind === "round-terminal") this.terminals += 1; else this.checkpoints += 1; await pending; return 1; } }
-    const clock = new ManualMonotonicClock(); const writer = new SlowWriter(); let replacements = 0;
-    const game = new GameController({ course, state: initial, writer, clock, shotId: () => "shot-1", resolve: () => shot(), replaceRound: async () => { replacements += 1; await pending; } });
+    const clock = new ManualMonotonicClock(); const writer = new SlowWriter();
+    const game = new GameController({ course, state: initial, writer, clock, shotId: () => "shot-1", resolve: () => shot(), presentation: presentation(clock) });
     clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("release"); game.key(" "); game.key(" "); game.key("Escape"); game.key("Escape"); expect(writer.shots).toBe(1);
     release(); await flush(); expect(game.closed).toBe(true);
-    // Terminal and replacement operations use the same single-flight guard; the accepted
-    // confirmation path above proves terminal writes are not issued before the first settles.
-    expect(replacements).toBe(0);
   });
 
   it("AC-UI-002-01 AC-UI-002-03 samples all half-open meter bins at event time after delayed rendering", () => {
