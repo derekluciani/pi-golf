@@ -5,7 +5,7 @@ import type { Course } from "../course-loader/types.ts";
 import { resolveShot, type ResolvedShot } from "../simulation/outcome.ts";
 import { OUT_OF_BOUNDS } from "../course-loader/index.ts";
 import { CameraController } from "../ui/index.ts";
-import { GAME_BASE_STATES, GameController, gameOptionsFromRecovered, meterBlocksAt, newRoundState, renderPowerMeter, type GameWriter } from "./index.ts";
+import { GAME_BASE_STATES, METER_INPUT_CONTRACT, GameController, gameOptionsFromRecovered, meterBlocksAt, newRoundState, renderPowerMeter, type GameWriter } from "./index.ts";
 
 const course: Course = { schemaVersion: 1, id: "preview", name: "Preview Course", holes: [
   { id: "h1", number: 1, par: 4, tee: { x: 0, y: 0 }, cup: { x: 10, y: 0 }, boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }] }, regions: [] },
@@ -132,5 +132,69 @@ describe("V2-T10 FSM and game component", () => {
   it("AC-UI-004-01 AC-UI-004-02 Esc and Q preserve meter offsets, queue only committed work, and abandon durably", async () => {
     const { game, clock, writer } = makeGame("rest"); clock.advanceBy(1_000); game.tick(); game.key(" "); clock.advanceBy(150); game.key("Q"); clock.advanceBy(5_000); game.key("N"); expect(game.meterBlocks).toBe(2); game.key("Escape"); await flush(); expect(writer.shots).toBe(0); expect(game.closed).toBe(true);
     const second = makeGame("rest"); second.clock.advanceBy(1_000); second.game.tick(); second.game.key(" "); second.game.key("release"); second.game.key(" "); second.game.key("Q"); await flush(); expect(second.game.state.kind).toBe("playback"); second.game.key("Q"); second.clock.advanceBy(100); second.game.tick(); expect(second.game.state.kind).toBe("confirm-abandon"); second.game.key("Y"); await flush(); expect(second.writer.terminals).toBe(1); expect(second.game.round.status).toBe("abandoned");
+  });
+
+  it("AC-UI-002-03 defines no-release fallback: only a later non-repeat press commits", async () => {
+    expect(METER_INPUT_CONTRACT).toBe("non-repeat Space/Enter events are distinct presses; repeat events never commit");
+    const { game, clock, writer } = makeGame(); clock.advanceBy(1_000); game.tick();
+    game.key(" ");
+    for (let repeat = 0; repeat < 4; repeat++) game.key(" ", clock.now() + repeat * 150, true);
+    expect(game.state.kind).toBe("metering"); expect(writer.shots).toBe(0);
+    // No synthetic release: Pi's next non-repeat key event is a new press.
+    game.key("Enter", clock.now() + 750); await flush();
+    expect(writer.shots).toBe(1); expect(game.state.kind).toBe("playback");
+  });
+
+  it("AC-UI-001-02 AC-UI-001-03 exhaustively rejects mutation keys outside aiming", async () => {
+    const ignored = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Tab", " ", "Enter"];
+    const assertIgnored = (game: GameController, writer: Writer): void => {
+      const before = game.round; const writes = writer.shots; for (const key of ignored) game.key(key, undefined, true);
+      expect(game.round).toEqual(before); expect(writer.shots).toBe(writes);
+    };
+    const intro = makeGame(); assertIgnored(intro.game, intro.writer);
+    const meter = makeGame(); meter.clock.advanceBy(1_000); meter.game.tick(); meter.game.key(" "); assertIgnored(meter.game, meter.writer);
+    const committing = makeGame(); committing.clock.advanceBy(1_000); committing.game.tick(); committing.game.key(" "); committing.game.key(" ", committing.clock.now(), false); await flush();
+    // Playback is the committed boundary; all aim/meter mutation keys remain ignored.
+    assertIgnored(committing.game, committing.writer);
+    const confirm = makeGame(); confirm.clock.advanceBy(1_000); confirm.game.tick(); confirm.game.key("Q"); assertIgnored(confirm.game, confirm.writer);
+  });
+
+  it("AC-UI-001-04 persists failed Shot retry and terminal/checkpoint operations exactly once through GameController", async () => {
+    const { game, clock, writer } = makeGame(); writer.fail = true; clock.advanceBy(1_000); game.tick(); game.key(" "); game.key(" ", clock.now() + 300); await flush();
+    expect(game.state).toMatchObject({ kind: "committing", error: "Could not save Shot. Press Space or Enter to retry." }); expect(game.round).toEqual(initial);
+    writer.fail = false; game.key("Enter", clock.now() + 450); game.key("Enter", clock.now() + 600, true); await flush();
+    expect(writer.shots).toBe(2); expect(game.hudScore).toMatchObject({ playedStrokes: 1, penaltyStrokes: 0, holeScore: 1 });
+    game.key("Escape"); game.key("Escape"); clock.advanceBy(100); game.tick(); await flush(); expect(writer.checkpoints).toBe(0); expect(game.closed).toBe(true);
+    const terminal = makeGame(); terminal.clock.advanceBy(1_000); terminal.game.tick(); terminal.game.key("Q"); terminal.game.key("Y"); terminal.game.key("Y"); await flush();
+    expect(terminal.writer.terminals).toBe(1); expect(terminal.game.round.status).toBe("abandoned");
+  });
+
+  it("AC-UI-002-04 starts one block after each committed Shot without a release event", async () => {
+    const { game, clock } = makeGame(); clock.advanceBy(1_000); game.tick(); game.key(" "); game.key(" ", clock.now() + 900); await flush(); clock.advanceBy(100); game.tick();
+    expect(game.state.kind).toBe("aiming"); game.key("Enter"); expect(game.state.kind).toBe("metering"); expect(game.meterBlocks).toBe(1);
+  });
+
+  it("AC-UI-003-01 AC-UI-003-03 preserves queued playback and penalty actions across resize", async () => {
+    for (const terminal of ["rest", "water"] as const) {
+      const { game, clock } = makeGame(terminal); clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("Enter", clock.now() + 150); await flush();
+      if (terminal === "rest") game.key("Q"); else { clock.advanceBy(100); game.tick(); game.key("Q"); }
+      const before = game.state.kind; game.resize(59, 19); clock.advanceBy(9_000); game.resize(60, 20);
+      expect(game.state.kind).toBe(before);
+      if (terminal === "rest") { clock.advanceBy(100); game.tick(); } else { clock.advanceBy(2_000); game.tick(); }
+      expect(game.state.kind).toBe("confirm-abandon");
+    }
+  });
+
+  it("AC-UI-004-01 AC-UI-004-02 covers Esc and Q at every allowed legal boundary", async () => {
+    const aiming = makeGame(); aiming.clock.advanceBy(1_000); aiming.game.tick(); aiming.game.key("Escape"); await flush(); expect(aiming.game.closed).toBe(true);
+    const metering = makeGame(); metering.clock.advanceBy(1_000); metering.game.tick(); metering.game.key(" "); metering.game.key("Q"); expect(metering.game.state.kind).toBe("confirm-abandon"); metering.game.key("Escape"); expect(metering.game.state.kind).toBe("metering");
+    for (const terminal of ["rest", "water"] as const) {
+      const queued = makeGame(terminal); queued.clock.advanceBy(1_000); queued.game.tick(); queued.game.key(" "); queued.game.key("Enter", queued.clock.now() + 150); await flush();
+      if (terminal === "water") { queued.clock.advanceBy(100); queued.game.tick(); }
+      queued.game.key("Escape"); expect(queued.game.closed).toBe(false);
+      queued.game.resize(59, 19); queued.clock.advanceBy(3_000); queued.game.resize(60, 20);
+      if (terminal === "rest") { queued.clock.advanceBy(100); queued.game.tick(); } else { queued.clock.advanceBy(2_000); queued.game.tick(); }
+      expect(queued.game.closed).toBe(true);
+    }
   });
 });

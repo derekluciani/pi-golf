@@ -17,7 +17,7 @@ type Timed = { readonly beganAt: number };
 export type GameBaseState =
   | ({ readonly kind: "intro" } & Timed)
   | { readonly kind: "aiming" }
-  | ({ readonly kind: "metering"; readonly requiresNewPress: boolean } & Timed)
+  | ({ readonly kind: "metering" } & Timed)
   | { readonly kind: "committing"; readonly shotId: string; readonly shot: ResolvedShot; readonly next: PersistedRoundState; readonly queued: QueuedAction; readonly error: string | null }
   | ({ readonly kind: "playback"; readonly shot: ResolvedShot; readonly queued: QueuedAction } & Timed)
   | ({ readonly kind: "penalty-notice"; readonly terminal: "water" | "out-of-bounds"; readonly queued: QueuedAction } & Timed)
@@ -25,6 +25,12 @@ export type GameBaseState =
   | { readonly kind: "round-summary" }
   | ({ readonly kind: "confirm-abandon"; readonly prior: Exclude<GameBaseState, { readonly kind: "confirm-abandon" }> } & Timed);
 export type GameState = GameBaseState | { readonly kind: "resize-paused"; readonly suspended: GameBaseState };
+/**
+ * Pi may omit key-release events. `repeat: true` is always a held-key repeat and
+ * is ignored; each later non-repeat Space/Enter event is a distinct press and may
+ * commit. A release event is optional and has no bearing on this contract.
+ */
+export const METER_INPUT_CONTRACT = "non-repeat Space/Enter events are distinct presses; repeat events never commit" as const;
 
 /** T09 mutation surface; Game never writes presentation state. */
 export interface GameWriter {
@@ -146,7 +152,7 @@ export class GameController {
     else if (key === "ArrowUp") this.setClub(selectAdjacentClub(this.#round.selectedClub, -1));
     else if (key === "ArrowDown") this.setClub(selectAdjacentClub(this.#round.selectedClub, 1));
     else if (key === "Tab") this.#presentation.camera.tab();
-    else if ((key === " " || key === "Enter") && !repeat) this.#base = { kind: "metering", beganAt: eventTime, requiresNewPress: true };
+    else if ((key === " " || key === "Enter") && !repeat) this.#base = { kind: "metering", beganAt: eventTime };
     else if (key === "Escape") this.closeCheckpoint("aiming");
     else if (key === "Q") this.confirm({ kind: "aiming" });
   }
@@ -154,8 +160,10 @@ export class GameController {
     const state = this.#base; if (state.kind !== "metering") return;
     if (key === "Escape") { this.#base = { kind: "aiming" }; this.closeCheckpoint("aiming"); }
     else if (key === "Q") this.confirm(state);
-    else if (key === "release") this.#base = { ...state, requiresNewPress: false };
-    else if ((key === " " || key === "Enter") && !repeat && !state.requiresNewPress) this.startCommit(eventTime);
+    // The starting event was handled in aiming, so it cannot also reach this
+    // state. Explicit releases are optional; Pi's `repeat` flag distinguishes
+    // held-key repeats from a later physical press when releases are unavailable.
+    else if ((key === " " || key === "Enter") && !repeat) this.startCommit(eventTime);
   }
   private startCommit(eventTime: number): void {
     const state = this.#base; if (state.kind !== "metering" || this.#commitPromise !== null) return;
