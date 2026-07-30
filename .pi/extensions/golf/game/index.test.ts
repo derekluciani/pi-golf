@@ -114,8 +114,23 @@ describe("V2-T10 FSM and game component", () => {
     const { game, clock } = makeGame("water"); clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("release"); game.key(" "); await flush(); clock.advanceBy(100); game.tick(); game.resize(59, 19); clock.advanceBy(20_000); game.resize(60, 20); game.tick(); expect(game.state.kind).toBe("penalty-notice");
   });
 
+  it("AC-UI-003-01 AC-UI-003-03 defers a resolved commit, playback creation, and queued Esc until resize restoration", async () => {
+    let release!: () => void; const pending = new Promise<void>((resolve) => { release = resolve; });
+    class DelayedWriter extends Writer { override async commitShot(): Promise<number> { this.shots += 1; await pending; return this.shots; } }
+    const clock = new ManualMonotonicClock(); const writer = new DelayedWriter();
+    const game = new GameController({ course, state: initial, writer, clock, shotId: () => "shot-1", resolve: () => shot(), presentation: presentation(clock) });
+    clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("release"); game.key(" "); game.key("Q"); expect(game.state.kind).toBe("committing"); game.resize(59, 19); release(); await flush();
+    expect(game.state).toMatchObject({ kind: "resize-paused", suspended: { kind: "committing" } }); expect(game.closed).toBe(false);
+    game.resize(60, 20); expect(game.state.kind).toBe("playback");
+    let releasePause!: () => void; const pendingPause = new Promise<void>((resolve) => { releasePause = resolve; });
+    class PauseWriter extends Writer { override async commitShot(): Promise<number> { this.shots += 1; await pendingPause; return this.shots; } }
+    const pauseClock = new ManualMonotonicClock(); const pauseGame = new GameController({ course, state: initial, writer: new PauseWriter(), clock: pauseClock, shotId: () => "shot-2", resolve: () => ({ ...shot(), shotId: "shot-2" }), presentation: presentation(pauseClock) });
+    pauseClock.advanceBy(1_000); pauseGame.tick(); pauseGame.key(" "); pauseGame.key("release"); pauseGame.key(" "); pauseGame.key("Escape"); pauseGame.resize(59, 19); releasePause(); await flush();
+    expect(pauseGame.closed).toBe(false); expect(pauseGame.state).toMatchObject({ kind: "resize-paused", suspended: { kind: "committing" } }); pauseGame.resize(60, 20); expect(pauseGame.closed).toBe(true);
+  });
+
   it("AC-UI-004-01 AC-UI-004-02 Esc and Q preserve meter offsets, queue only committed work, and abandon durably", async () => {
     const { game, clock, writer } = makeGame("rest"); clock.advanceBy(1_000); game.tick(); game.key(" "); clock.advanceBy(150); game.key("Q"); clock.advanceBy(5_000); game.key("N"); expect(game.meterBlocks).toBe(2); game.key("Escape"); await flush(); expect(writer.shots).toBe(0); expect(game.closed).toBe(true);
-    const second = makeGame("rest"); second.clock.advanceBy(1_000); second.game.tick(); second.game.key(" "); second.game.key("release"); second.game.key(" "); second.game.key("Q"); await flush(); second.clock.advanceBy(100); second.game.tick(); expect(second.game.state.kind).toBe("confirm-abandon"); second.game.key("Y"); await flush(); expect(second.writer.terminals).toBe(1); expect(second.game.round.status).toBe("abandoned");
+    const second = makeGame("rest"); second.clock.advanceBy(1_000); second.game.tick(); second.game.key(" "); second.game.key("release"); second.game.key(" "); second.game.key("Q"); await flush(); expect(second.game.state.kind).toBe("playback"); second.game.key("Q"); second.clock.advanceBy(100); second.game.tick(); expect(second.game.state.kind).toBe("confirm-abandon"); second.game.key("Y"); await flush(); expect(second.writer.terminals).toBe(1); expect(second.game.round.status).toBe("abandoned");
   });
 });

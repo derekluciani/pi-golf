@@ -86,7 +86,8 @@ export class GameController {
   #round: PersistedRoundState; #played: number; #penalties: number; #hudVisible = true; #closed = false;
   #commitPromise: Promise<void> | null = null; #advancePromise: Promise<void> | null = null;
   #checkpointPromise: Promise<void> | null = null; #terminalPromise: Promise<void> | null = null; #replacementPromise: Promise<void> | null = null;
-  readonly #course: Course; readonly #writer: GameWriter; readonly #clock: MonotonicClock; readonly #shotId: () => string;
+  #deferredCommit: { readonly state: Extract<GameBaseState, { readonly kind: "committing" }>; readonly error: boolean } | null = null;
+  #course: Course; readonly #writer: GameWriter; readonly #clock: MonotonicClock; readonly #shotId: () => string;
   readonly #resolve: (power: Power) => ResolvedShot; readonly #replacement: RoundReplacement | undefined; readonly #presentation: GamePresentation;
   #playback: ResolvedShotPlayback | null = null;
 
@@ -118,6 +119,8 @@ export class GameController {
     const frozen = this.#suspendedAt; this.#suspended = false; this.#suspendedAt = null;
     if (frozen !== null) this.#base = shiftTimedState(this.#base, this.now() - frozen);
     this.#presentation.camera.resumeFromResize(); this.#playback?.resumeFromResize();
+    const deferred = this.#deferredCommit; this.#deferredCommit = null;
+    if (deferred !== null) this.finishCommit(deferred.state, deferred.error);
   }
   tick(): void {
     if (this.#suspended || this.#closed) return; const now = this.now(); const state = this.#base;
@@ -131,7 +134,7 @@ export class GameController {
     const state = this.#base;
     if (state.kind === "aiming") return this.aimingKey(key, eventTime, repeat);
     if (state.kind === "metering") return this.meterKey(key, eventTime, repeat);
-    if (state.kind === "committing") { if (key === "Escape") this.queue("pause"); else if (key === "Q") this.queue("abandon"); else if ((key === " " || key === "Enter") && state.error !== null && !repeat) this.commit(state); return; }
+    if (state.kind === "committing") { if (key === "Escape") this.queue("pause"); else if ((key === " " || key === "Enter") && state.error !== null && !repeat) this.commit(state); return; }
     if (state.kind === "playback" || state.kind === "penalty-notice") { if (key === "Escape") this.queue("pause"); else if (key === "Q") this.queue("abandon"); return; }
     if (state.kind === "hole-summary") { if (key === " " || key === "Enter") this.advanceHole(); else if (key === "Escape") this.closeCheckpoint("hole-summary"); return; }
     if (state.kind === "round-summary") { if (key === "Escape") this.closeTerminal("complete"); else if (key === "R") this.replace(); return; }
@@ -162,13 +165,21 @@ export class GameController {
   }
   private commit(state: Extract<GameBaseState, { readonly kind: "committing" }>): void {
     if (this.#commitPromise !== null) return;
-    const work = this.#writer.commitShot(toDurableShot(state.shot), state.next).then(() => {
+    const settle = (error: boolean): void => {
       if (this.#base.kind !== "committing" || this.#base.shotId !== state.shotId) return;
-      const queued = this.#base.queued; this.#round = state.next; this.#played = state.shot.resultingRound.playedStrokes; this.#penalties = state.shot.resultingRound.penaltyStrokes;
-      if (queued === "pause") { this.#closed = true; return; }
-      this.#playback = new ResolvedShotPlayback(this.#clock, { shotId: state.shot.shotId, keyframes: state.shot.keyframes.map((frame) => ({ atMilliseconds: Math.round(frame.elapsed * 1_000), position: frame.position, speed: frame.speed })), terminal: state.shot.terminal }); this.#playback.start(); this.#base = { kind: "playback", shot: state.shot, beganAt: this.now(), queued };
-    }, () => { if (this.#base.kind === "committing" && this.#base.shotId === state.shotId) this.#base = { ...state, queued: this.#base.queued, error: "Could not save Shot. Press Space or Enter to retry." }; }).finally(() => { this.#commitPromise = null; });
+      if (this.#suspended) { this.#deferredCommit = { state, error }; return; }
+      this.finishCommit(state, error);
+    };
+    const work = this.#writer.commitShot(toDurableShot(state.shot), state.next).then(() => settle(false), () => settle(true)).finally(() => { this.#commitPromise = null; });
     this.#commitPromise = work;
+  }
+  /** A durable append settling while undersized is not a legal UI boundary until restoration. */
+  private finishCommit(state: Extract<GameBaseState, { readonly kind: "committing" }>, error: boolean): void {
+    if (this.#base.kind !== "committing" || this.#base.shotId !== state.shotId) return;
+    if (error) { this.#base = { ...state, queued: this.#base.queued, error: "Could not save Shot. Press Space or Enter to retry." }; if (this.#base.queued === "pause") this.#closed = true; return; }
+    const queued = this.#base.queued; this.#round = state.next; this.#played = state.shot.resultingRound.playedStrokes; this.#penalties = state.shot.resultingRound.penaltyStrokes;
+    if (queued === "pause") { this.#closed = true; return; }
+    this.#playback = new ResolvedShotPlayback(this.#clock, { shotId: state.shot.shotId, keyframes: state.shot.keyframes.map((frame) => ({ atMilliseconds: Math.round(frame.elapsed * 1_000), position: frame.position, speed: frame.speed })), terminal: state.shot.terminal }); this.#playback.start(); this.#base = { kind: "playback", shot: state.shot, beganAt: this.now(), queued };
   }
   private afterPlayback(): void {
     const state = this.#base; if (state.kind !== "playback") return; this.#playback = null;
@@ -212,10 +223,13 @@ export class GameController {
     const work = this.#writer.append({ kind: "round-terminal", payload: { status, state: next } }).then(() => { this.#round = next; this.#closed = true; }).finally(() => { this.#terminalPromise = null; }); this.#terminalPromise = work;
   }
   private replace(): void {
-    if (this.#replacementPromise !== null || this.#replacement === undefined) return;
+    if (this.#replacementPromise !== null || this.#replacement === undefined || this.#base.kind !== "round-summary") return;
     const replacement = this.#replacement;
-    const work = appendRoundReplacement(replacement.store, replacement).finally(() => { this.#replacementPromise = null; });
-    this.#replacementPromise = work;
+    const work = replacement.store.read(replacement.predecessorRoundId).then((authoritative) => appendRoundReplacement(replacement.store, { ...replacement, predecessorRevision: authoritative.revision })).then((successor) => {
+      if (this.#base.kind !== "round-summary" || successor.state.status !== "active" || successor.terminal) throw new Error("Replacement did not produce an active successor.");
+      this.#course = replacement.successorSnapshot.course; this.#round = successor.state; this.#played = successor.currentHolePlayedStrokes; this.#penalties = successor.currentHolePenaltyStrokes;
+      this.#base = { kind: "intro", beganAt: this.now() }; this.#presentation.camera.aim(this.#round.lie, this.#presentation.target());
+    }).finally(() => { this.#replacementPromise = null; }); this.#replacementPromise = work;
   }
   private hole(): CourseHole { const hole = this.#course.holes[this.#round.currentHoleIndex]; if (hole === undefined) throw new Error("Current Hole is missing."); return hole; }
   private courseHole(score: PersistedHoleScore): CourseHole { const hole = this.#course.holes[score.hole.courseIndex]; if (hole === undefined || hole.id !== score.hole.id || hole.number !== score.hole.number) throw new Error("Missing scored Hole."); return hole; }
