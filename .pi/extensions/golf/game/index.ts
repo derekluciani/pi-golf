@@ -237,7 +237,7 @@ export class GameController {
       if (this.#base.kind !== "round-summary" || successor.state.status !== "active" || successor.terminal) throw new Error("Replacement did not produce an active successor.");
       this.#course = replacement.successorSnapshot.course; this.#round = successor.state; this.#played = successor.currentHolePlayedStrokes; this.#penalties = successor.currentHolePenaltyStrokes;
       this.#base = { kind: "intro", beganAt: this.now() }; this.#presentation.camera.aim(this.#round.lie, this.#presentation.target());
-    }).finally(() => { this.#replacementPromise = null; }); this.#replacementPromise = work;
+    }).catch(() => { /* A retry retains the durable predecessor or reconciles its linked successor. */ }).finally(() => { this.#replacementPromise = null; }); this.#replacementPromise = work;
   }
   private hole(): CourseHole { const hole = this.#course.holes[this.#round.currentHoleIndex]; if (hole === undefined) throw new Error("Current Hole is missing."); return hole; }
   private courseHole(score: PersistedHoleScore): CourseHole { const hole = this.#course.holes[score.hole.courseIndex]; if (hole === undefined || hole.id !== score.hole.id || hole.number !== score.hole.number) throw new Error("Missing scored Hole."); return hole; }

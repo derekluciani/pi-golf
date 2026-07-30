@@ -1,10 +1,15 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { ManualMonotonicClock, parseCourseHoleIndex, parseCourseId, parseShotDirectionIndex, type PersistedRoundState } from "../domain/index.ts";
+import { parseCourseJson } from "../course-loader/raw-parser.ts";
 import type { Course } from "../course-loader/types.ts";
 import { resolveShot, type ResolvedShot } from "../simulation/outcome.ts";
 import { OUT_OF_BOUNDS } from "../course-loader/index.ts";
 import { CameraController } from "../ui/index.ts";
+import { appendRoundStart, RoundMutationWriter, RoundStore } from "../persistence/index.ts";
 import { GAME_BASE_STATES, METER_INPUT_CONTRACT, GameController, gameOptionsFromRecovered, meterBlocksAt, newRoundState, renderPowerMeter, type GameWriter } from "./index.ts";
 
 const course: Course = { schemaVersion: 1, id: "preview", name: "Preview Course", holes: [
@@ -25,6 +30,14 @@ function makeGame(terminal: ResolvedShot["terminal"] = "rest"): { game: GameCont
   const game = new GameController({ course, state: initial, writer, clock, shotId: () => "shot-1", resolve, presentation: presentation(clock) }); reference.current = game; return { game, clock, writer };
 }
 async function flush(): Promise<void> { await Promise.resolve(); await Promise.resolve(); }
+async function flushDurable(): Promise<void> { for (let index = 0; index < 8; index += 1) await new Promise<void>((done) => setImmediate(done)); }
+async function durableFixture(): Promise<{ root: string; store: RoundStore; snapshot: { readonly course: Course; readonly serializedCourse: string }; recovered: Awaited<ReturnType<typeof appendRoundStart>> }> {
+  const root = await mkdtemp(join(tmpdir(), "pi-golf-game-")); const store = new RoundStore({ root: join(root, ".pi/golf/rounds") });
+  const serializedCourse = await readFile(new URL("../courses/preview-course.json", import.meta.url), "utf8"); const parsed = parseCourseJson(serializedCourse);
+  if (!parsed.ok) throw new Error("Preview Course fixture must be valid."); const snapshot = { course: parsed.value, serializedCourse };
+  const recovered = await appendRoundStart(store, { roundId: "round-a", snapshot, state: newRoundState(snapshot), branchId: "session-a" });
+  return { root, store, snapshot, recovered };
+}
 
 describe("V2-T10 FSM and game component", () => {
   it("AC-UI-001-01 enumerates exactly the nine base states and resize-paused wrapper", () => { expect(GAME_BASE_STATES).toEqual(["intro", "aiming", "metering", "committing", "playback", "penalty-notice", "hole-summary", "round-summary", "confirm-abandon"]); });
@@ -197,4 +210,45 @@ describe("V2-T10 FSM and game component", () => {
       expect(queued.game.closed).toBe(true);
     }
   });
+
+  it("AC-UI-001-02 AC-UI-001-03 rejects every non-table input in each constructed FSM state without canonical or writer mutation", async () => {
+    const ignored = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Tab"];
+    const assertIgnored = (game: GameController, writer: Writer): void => {
+      const round = structuredClone(game.round); const writes = [writer.shots, writer.checkpoints, writer.terminals];
+      for (const key of ignored) game.key(key, undefined, true);
+      expect(game.round).toEqual(round); expect([writer.shots, writer.checkpoints, writer.terminals]).toEqual(writes);
+    };
+    const intro = makeGame(); assertIgnored(intro.game, intro.writer);
+    const aiming = makeGame(); aiming.clock.advanceBy(1_000); aiming.game.tick(); assertIgnored(aiming.game, aiming.writer);
+    const metering = makeGame(); metering.clock.advanceBy(1_000); metering.game.tick(); metering.game.key(" "); assertIgnored(metering.game, metering.writer);
+    const committing = makeGame(); committing.clock.advanceBy(1_000); committing.game.tick(); committing.game.key(" "); committing.game.key("Enter", committing.clock.now() + 150); await flush(); assertIgnored(committing.game, committing.writer);
+    const playback = makeGame(); playback.clock.advanceBy(1_000); playback.game.tick(); playback.game.key(" "); playback.game.key("Enter", playback.clock.now() + 150); await flush(); assertIgnored(playback.game, playback.writer);
+    const notice = makeGame("water"); notice.clock.advanceBy(1_000); notice.game.tick(); notice.game.key(" "); notice.game.key("Enter", notice.clock.now() + 150); await flush(); notice.clock.advanceBy(100); notice.game.tick(); assertIgnored(notice.game, notice.writer);
+    const summary = makeGame("cup"); summary.clock.advanceBy(1_000); summary.game.tick(); summary.game.key(" "); summary.game.key("Enter", summary.clock.now() + 150); await flush(); summary.clock.advanceBy(100); summary.game.tick(); assertIgnored(summary.game, summary.writer);
+    const confirmation = makeGame(); confirmation.clock.advanceBy(1_000); confirmation.game.tick(); confirmation.game.key("Q"); assertIgnored(confirmation.game, confirmation.writer);
+    for (const fixture of [intro, metering, notice, summary, confirmation]) { fixture.game.resize(59, 19); const before = structuredClone(fixture.game.round); fixture.game.key("ArrowDown"); fixture.game.key("Enter"); expect(fixture.game.state.kind).toBe("resize-paused"); expect(fixture.game.round).toEqual(before); }
+  });
+
+  it("AC-UI-003-01 AC-UI-003-02 AC-UI-003-03 freezes constructed metering, summaries, confirmation, and queued playback at resize boundaries", async () => {
+    const metering = makeGame(); metering.clock.advanceBy(1_000); metering.game.tick(); metering.game.key(" "); metering.clock.advanceBy(300); const meterOffset = metering.game.meterBlocks;
+    metering.game.resize(59, 19); metering.clock.advanceBy(9_000); metering.game.resize(60, 20); expect(metering.game.state.kind).toBe("metering"); expect(metering.game.meterBlocks).toBe(meterOffset);
+    metering.game.key("Q"); expect(metering.game.state.kind).toBe("confirm-abandon"); metering.game.resize(59, 19); metering.clock.advanceBy(9_000); metering.game.resize(60, 20); metering.game.key("N"); expect(metering.game.state.kind).toBe("metering"); expect(metering.game.meterBlocks).toBe(meterOffset);
+    const hole = makeGame("cup"); hole.clock.advanceBy(1_000); hole.game.tick(); hole.game.key(" "); hole.game.key("Enter", hole.clock.now() + 150); await flush(); hole.clock.advanceBy(100); hole.game.tick(); hole.game.resize(59, 19); hole.clock.advanceBy(9_000); hole.game.resize(60, 20); expect(hole.game.state.kind).toBe("hole-summary");
+    const queued = makeGame(); queued.clock.advanceBy(1_000); queued.game.tick(); queued.game.key(" "); queued.game.key("Enter", queued.clock.now() + 150); await flush(); queued.game.key("Q"); queued.game.resize(59, 19); queued.clock.advanceBy(9_000); queued.game.resize(60, 20); expect(queued.game.state.kind).toBe("playback"); queued.clock.advanceBy(100); queued.game.tick(); expect(queued.game.state.kind).toBe("confirm-abandon");
+  });
+
+  it("AC-GME-001-03 AC-UI-004-01 persists a reached Hole summary before Esc closes it", async () => {
+    const { root, store, snapshot, recovered } = await durableFixture();
+    try {
+      const clock = new ManualMonotonicClock(); const durable = await RoundMutationWriter.forSession(store, "session-a", "round-a", recovered.revision); let pending: Promise<number> | null = null;
+      const adapter: GameWriter = { commitShot: (saved, state) => { pending = durable.commitShot(saved, state); return pending; }, append: (entry) => { pending = durable.append(entry); return pending; } };
+      const firstCup = snapshot.course.holes[0]?.cup ?? initial.lie;
+      const resolve = (power: number): ResolvedShot => { const base = shot("cup"); return { ...base, shotId: "cup-1", preShotLie: recovered.state.lie, inputs: { club: recovered.state.selectedClub, directionIndex: recovered.state.shotDirectionIndex, power }, landingPosition: firstCup, finalPosition: firstCup, resultingRound: { ...base.resultingRound, lie: firstCup, selectedClub: recovered.state.selectedClub, directionIndex: recovered.state.shotDirectionIndex } }; };
+      const game = new GameController({ course: snapshot.course, state: recovered.state, writer: adapter, clock, shotId: () => "cup-1", resolve, presentation: presentation(clock) });
+      clock.advanceBy(1_000); game.tick(); game.key(" "); game.key("Enter", clock.now() + 150); if (pending === null) throw new Error("Shot was not submitted"); await pending; await flushDurable(); clock.advanceBy(1_000); game.tick(); expect(game.state).toMatchObject({ kind: "hole-summary" });
+      game.key("Escape"); if (pending === null) throw new Error("Checkpoint was not submitted"); await pending; await flushDurable(); expect(game.closed).toBe(true); expect(await store.read("round-a")).toMatchObject({ lifecycle: "hole-summary", terminal: false });
+    } finally { await rm(root, { recursive: true }); }
+  });
+
+
 });
