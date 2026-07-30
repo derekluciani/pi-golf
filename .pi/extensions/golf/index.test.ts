@@ -8,12 +8,34 @@ import { describe, expect, it, vi } from "vitest";
 import { validateCourse } from "./course-loader/index.ts";
 import {
   parseShotDirectionIndex,
+  type PersistedRoundState,
   vectorForShotDirection,
 } from "./domain/index.ts";
 import registerGolfExtension from "./index.ts";
+import { GOLF_BRANCH_REFERENCE_TYPE, RoundStore, type GolfEntryV1 } from "./persistence/index.ts";
 
 async function readProjectFile(path: string): Promise<string> {
   return readFile(new URL(`../../../${path}`, import.meta.url), "utf8");
+}
+
+const COMMAND_COURSE = JSON.stringify({ schemaVersion: 1, id: "command-course", name: "Command Course", holes: [{ id: "command-hole", number: 1, par: 3, boundary: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] }, tee: { x: 1, y: 1 }, cup: { x: 2, y: 2 }, regions: [{ terrain: "green", shape: { type: "polygon", points: [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }] } }] }] });
+
+function commandState(status: PersistedRoundState["status"] = "active"): PersistedRoundState {
+  return { kind: "persisted-round", courseId: "command-course" as never, currentHoleIndex: 0 as never, lie: { x: 1, y: 1 }, selectedClub: "driver", shotDirectionIndex: 0 as never, holeScores: [], status };
+}
+
+function terminalRoundEntries(roundId: string, status: "complete" | "abandoned"): readonly GolfEntryV1[] {
+  const initial = commandState();
+  if (status === "abandoned") return [
+    { entryVersion: 1, roundId, revision: 0, kind: "round-start", payload: { courseSnapshot: COMMAND_COURSE, state: initial, branchId: "branch-a" } },
+    { entryVersion: 1, roundId, revision: 1, kind: "round-terminal", payload: { status, state: commandState(status) } },
+  ];
+  const completed = { ...commandState(), lie: { x: 2, y: 2 }, holeScores: [{ hole: { id: "command-hole" as never, number: 1 as never, courseIndex: 0 as never }, playedStrokes: 1, penaltyStrokes: 0, completed: true }] } as PersistedRoundState;
+  return [
+    { entryVersion: 1, roundId, revision: 0, kind: "round-start", payload: { courseSnapshot: COMMAND_COURSE, state: initial, branchId: "branch-a" } },
+    { entryVersion: 1, roundId, revision: 1, kind: "shot", payload: { state: completed, shot: { shotId: `${roundId}-cup`, preShotLie: { x: 1, y: 1 }, inputs: { club: "driver", directionIndex: 0, power: 1 }, landingPosition: { x: 2, y: 2 }, finalPosition: { x: 2, y: 2 }, terminal: "cup", resultingSpeed: 0, elapsed: 1, resultingRound: { lie: { x: 2, y: 2 }, playedStrokes: 1, penaltyStrokes: 0, selectedClub: "driver", directionIndex: 0 } } } },
+    { entryVersion: 1, roundId, revision: 2, kind: "round-terminal", payload: { status, state: { ...completed, status } } },
+  ];
 }
 
 describe("V2-FND-001 project-local extension foundation", () => {
@@ -157,6 +179,26 @@ describe("V2-FND-001 project-local extension foundation", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it("AC-CMD-001-01 starts exactly one new selected Course after complete or abandoned recovered Round invocation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-golf-command-terminal-"));
+    try {
+      for (const status of ["complete", "abandoned"] as const) {
+        const roundId = `terminal-${status}`; const store = new RoundStore({ root: join(root, ".pi/golf/rounds") });
+        for (const entry of terminalRoundEntries(roundId, status)) await store.append(entry);
+        let reference = { roundId, revision: status === "complete" ? 2 : 1 };
+        const appendEntry = vi.fn((_type: string, data: typeof reference) => { reference = data; }); const custom = vi.fn(async () => undefined);
+        const registerCommand = vi.fn(); registerGolfExtension({ registerCommand, appendEntry } as unknown as ExtensionAPI);
+        const handler = registerCommand.mock.calls[0]?.[1].handler as ((args: string, ctx: unknown) => Promise<void>);
+        const sessionManager = { getSessionId: () => "branch-a", getBranch: () => [{ type: "custom", id: "golf", parentId: null, timestamp: "x", customType: GOLF_BRANCH_REFERENCE_TYPE, data: reference }] };
+        await handler("", { mode: "tui", cwd: root, sessionManager, ui: { notify: vi.fn(), custom } });
+        await handler("", { mode: "tui", cwd: root, sessionManager, ui: { notify: vi.fn(), custom } });
+        expect(custom).toHaveBeenCalledTimes(2);
+        expect(appendEntry).toHaveBeenCalledTimes(1);
+        expect(reference.roundId).not.toBe(roundId);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("AC-CMD-001-02 confirms active replacement and records one linked successor", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-golf-command-new-"));
     try {
@@ -176,6 +218,34 @@ describe("V2-FND-001 project-local extension foundation", () => {
       const { RoundStore } = await import("./persistence/index.ts");
       const rounds = await new RoundStore({ root: join(root, ".pi/golf/rounds") }).findByBranch("branch-a");
       expect(rounds).toHaveLength(1);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("AC-CMD-001-02 command-level confirmed reentry and interrupted delivery retain exactly one linked active successor", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-golf-command-new-retry-"));
+    try {
+      const registerCommand = vi.fn(); let reference: { roundId: string; revision: number } | undefined;
+      const appendEntry = vi.fn((_type: string, data: { roundId: string; revision: number }) => { reference = data; });
+      let confirmReplacement!: (value: boolean) => void; const confirmation = new Promise<boolean>((resolve) => { confirmReplacement = resolve; });
+      const confirm = vi.fn(() => confirmation); let opens = 0; const custom = vi.fn(async () => { opens += 1; if (opens === 2) throw new Error("Overlay interrupted"); }); const notify = vi.fn();
+      registerGolfExtension({ registerCommand, appendEntry } as unknown as ExtensionAPI);
+      const handler = registerCommand.mock.calls[0]?.[1].handler as ((args: string, ctx: unknown) => Promise<void>);
+      const sessionManager = { getSessionId: () => "branch-a", getBranch: () => reference === undefined ? [] : [{ type: "custom", id: "golf", parentId: null, timestamp: "x", customType: GOLF_BRANCH_REFERENCE_TYPE, data: reference }] };
+      const ctx = { mode: "tui", cwd: root, sessionManager, ui: { notify, confirm, custom } };
+      await handler("", ctx);
+      const replacement = handler("new", ctx);
+      await vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+      const reentry = handler("new", ctx);
+      confirmReplacement(true);
+      await Promise.all([replacement, reentry]);
+      expect(custom).toHaveBeenCalledTimes(2);
+      expect(notify).toHaveBeenCalledWith("Could not open Pi Golf: Overlay interrupted", "error");
+      await handler("", ctx); // Retry after interrupted overlay delivery resumes the durable successor.
+      const rounds = await new RoundStore({ root: join(root, ".pi/golf/rounds") }).findByBranch("branch-a");
+      expect(rounds).toHaveLength(1);
+      expect(rounds[0]).toMatchObject({ terminal: false, replacement: null });
+      expect(appendEntry).toHaveBeenCalledTimes(2);
+      expect(custom).toHaveBeenCalledTimes(3);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
