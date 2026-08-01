@@ -1,0 +1,130 @@
+#!/usr/bin/expect -f
+# Evidence-only real Pi/TUI driver. It never imports product modules or writes Round state.
+# Usage: v2-t12-pi-harness.expect WORKDIR RAW_LOG JOURNEY [EXTENSION]
+set timeout 30
+if {$argc < 3 || $argc > 4} { puts stderr "usage: $argv0 WORKDIR RAW_LOG JOURNEY ?EXTENSION?"; exit 64 }
+set workdir [lindex $argv 0]
+set rawlog [lindex $argv 1]
+set journey [lindex $argv 2]
+set extension [expr {$argc == 4 ? [lindex $argv 3] : "$workdir/.pi/extensions/golf/index.ts"}]
+# `log_user 1` is required for Expect's `log_file` to retain the raw PTY bytes;
+# callers may redirect the mirrored stdout while the file remains authoritative.
+log_user 1
+log_file -noappend $rawlog
+cd $workdir
+set env(TERM) xterm-256color
+set env(COLORTERM) truecolor
+set env(PI_OFFLINE) 1
+set pi "$workdir/node_modules/.bin/pi"
+if {![file executable $pi]} { puts stderr "missing pinned project-local Pi executable: $pi"; exit 69 }
+spawn -noecho $pi --offline --no-session --approve --no-extensions --extension $extension
+
+proc drain_for {milliseconds} {
+  set deadline [expr {[clock milliseconds] + $milliseconds}]
+  while {[clock milliseconds] < $deadline} {
+    # Expect only supports whole-second timeouts. Poll non-blockingly at 5 ms so
+    # sub-second meter bins stay precise while every available PTY byte drains.
+    set timeout 0
+    expect {
+      -re {.+} {}
+      timeout {}
+      eof { error "Pi exited while draining output" }
+    }
+    after 5
+  }
+}
+proc wait_text {pattern {seconds 30}} {
+  set timeout $seconds
+  expect {
+    -re $pattern { return }
+    timeout { error "timed out waiting for $pattern" }
+    eof { error "Pi exited waiting for $pattern" }
+  }
+}
+proc command {text} { send -- "$text\r" }
+proc key {bytes} { send -- $bytes }
+proc repeat_key {bytes count} { for {set index 0} {$index < $count} {incr index} { key $bytes; drain_for 60 } }
+proc stroke {powerBlocks nextPattern} {
+  key " "
+  # Sample the middle of the requested 150 ms bin from the physical start press.
+  # Output is continuously drained while active time advances, so PTY backpressure
+  # cannot delay the meter while an `after` sleeps.
+  drain_for [expr {int(($powerBlocks - 0.5) * 150)}]
+  # Enter is a distinct commit press from the Space start press.
+  key "\r"
+  wait_text $nextPattern 120
+  # Drain beyond the longest Preview playback before the next input. This is
+  # readiness synchronization, not a blind `after`: PTY output is consumed.
+  drain_for 8000
+}
+
+# Readiness: drain startup/intro output through the actual aiming HUD.
+drain_for 1200
+switch -- $journey {
+  smoke {
+    command "/golf"
+    wait_text {Hole Score 0} 30
+    drain_for 1200
+    stroke 1 {Hole Score 1|Penalty Strokes|It's in the hole!}
+    key "\033"
+    drain_for 1500
+    command "/reload"
+    drain_for 2500
+  }
+  preview {
+    command "/golf"
+    wait_text {Hole Score 0} 30
+    drain_for 1200
+    # Hole 1: 4i 90%, then Driver 100% on the direct Cup bearing.
+    repeat_key "\033\[B" 2
+    stroke 9 {Arrows aim}
+    repeat_key "\033\[A" 2
+    stroke 10 {It's in the hole!}
+    key "\r"; wait_text {Hole 2} 20; drain_for 1200
+    # Hole 2: Driver 100%, then Driver 30%.
+    stroke 10 {Arrows aim}
+    stroke 3 {It's in the hole!}
+    key "\r"; wait_text {Hole 4} 20; drain_for 1200
+    # Hole 4: Driver, PW positioning, Driver carry over Water, three PW
+    # approaches, then bounded 10% putts until actual Cup capture.
+    stroke 10 {Arrows aim}
+    repeat_key "\033\[B" 8
+    stroke 10 {Arrows aim}
+    repeat_key "\033\[B" 2
+    stroke 10 {Arrows aim}
+    repeat_key "\033\[A" 2
+    stroke 10 {Arrows aim}
+    stroke 10 {Arrows aim}
+    stroke 7 {Arrows aim}
+    repeat_key "\033\[B" 1
+    for {set putt 0} {$putt < 6} {incr putt} {
+      stroke 1 {Arrows aim|It's in the hole!}
+      # Stop when the summary text is present in the retained transcript.
+      if {[string first "It's in the hole!" $expect_out(buffer)] >= 0} { break }
+    }
+    wait_text {Round complete} 30
+    wait_text {Total Par 12} 10
+    key "\033"; drain_for 1500
+  }
+  responsive {
+    command "/golf"
+    wait_text {Hole Score 0} 30
+    exec stty rows 19 columns 59 <@ $spawn_id
+    wait_text {needs at least 60} 10
+    exec stty rows 20 columns 60 <@ $spawn_id
+    wait_text {Hole Score 0} 10
+    exec stty rows 21 columns 61 <@ $spawn_id
+    drain_for 500
+    exec stty rows 59 columns 119 <@ $spawn_id
+    drain_for 500
+    exec stty rows 60 columns 120 <@ $spawn_id
+    wait_text {Hole Score 0} 10
+    key "\033"
+    drain_for 1500
+  }
+  default { puts stderr "unknown journey: $journey"; catch {send -- "\003"}; exit 64 }
+}
+catch {send -- "\003"}
+drain_for 250
+catch {expect eof}
+exit 0
