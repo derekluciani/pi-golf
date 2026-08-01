@@ -168,7 +168,7 @@ switch -- $journey {
     wait_text {Hole Score 0} 30
     drain_for 1200
     set log [latest_round_log]
-    # Two sequential real inputs: 4i 90%, then Driver 100%, both due east.
+    # Two sequential real inputs: 4i 90%, then 4i 100%, both due east.
     repeat_key "\033\[B" 2
     stroke_and_wait_ready 9 $log 1 4i 0
     # Probe keyboard readiness with a legal Club change. Ignored playback input
