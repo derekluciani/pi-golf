@@ -41,21 +41,113 @@ proc wait_text {pattern {seconds 30}} {
     eof { error "Pi exited waiting for $pattern" }
   }
 }
+proc drain_available {} {
+  while {1} {
+    set timeout 0
+    expect {
+      -re {.+} {}
+      timeout { return }
+      eof { error "Pi exited while establishing output boundary" }
+    }
+  }
+}
+proc latest_round_log {} {
+  global workdir
+  set logs [glob -nocomplain "$workdir/.pi/golf/rounds/*.jsonl"]
+  if {[llength $logs] == 0} { error "no durable Round log exists" }
+  return [lindex [lsort -command {apply {{a b} { expr {[file mtime $a] < [file mtime $b] ? 1 : -1} }}} $logs] 0]
+}
+proc durable_shot_matches {log shotOrdinal club direction power} {
+  set script {const fs=require('node:fs');const [p,n,c,d,w]=process.argv.slice(1);const e=fs.readFileSync(p,'utf8').trim().split('\n').map(JSON.parse);const s=e.filter(x=>x.kind==='shot');const x=s[Number(n)-1];if(!x||x.payload.shot.inputs.club!==c||x.payload.shot.inputs.directionIndex!==Number(d)||x.payload.shot.inputs.power!==Number(w))process.exit(1);}
+  return [expr {![catch {exec -- node -e $script $log $shotOrdinal $club $direction $power}]}]
+}
 proc command {text} { send -- "$text\r" }
 proc key {bytes} { send -- $bytes }
 proc repeat_key {bytes count} { for {set index 0} {$index < $count} {incr index} { key $bytes; drain_for 60 } }
+proc wait_meter_blocks {requested {seconds 12}} {
+  # Match the meter's complete fixed-color span. Requiring the reset immediately
+  # after the blocks prevents a requested short value matching a longer value;
+  # the meter color prevents Terrain glyphs from satisfying this observation.
+  set meterPattern {\x1b\[38;2;237;135;150m(█{1,10})\x1b\[0m}
+  set deadline [expr {[clock milliseconds] + ($seconds * 1000)}]
+  set sawOther 0
+  while {[clock milliseconds] < $deadline} {
+    set timeout 1
+    expect {
+      -re $meterPattern {
+        set visible [string length $expect_out(1,string)]
+        if {$visible != $requested} { set sawOther 1 }
+        # A transition observed after this Stroke's start rules out stale output.
+        if {$visible == $requested && $sawOther} { return }
+      }
+      timeout {}
+      eof { error "Pi exited waiting for Power Meter $requested-block transition" }
+    }
+  }
+  error "timed out waiting for observed Power Meter $requested-block transition"
+}
 proc stroke {powerBlocks nextPattern} {
   key " "
-  # Sample the middle of the requested 150 ms bin from the physical start press.
-  # Output is continuously drained while active time advances, so PTY backpressure
-  # cannot delay the meter while an `after` sleeps.
-  drain_for [expr {int(($powerBlocks - 0.5) * 150)}]
-  # Enter is a distinct commit press from the Space start press.
+  # Select only from the real rendered meter state. Expect continuously drains
+  # the PTY while waiting, and Enter is sent immediately after the requested
+  # complete colored span is observed rather than after a guessed duration.
+  wait_meter_blocks $powerBlocks
   key "\r"
   wait_text $nextPattern 120
-  # Drain beyond the longest Preview playback before the next input. This is
-  # readiness synchronization, not a blind `after`: PTY output is consumed.
+  # Legacy full-journey synchronization; the bounded readiness journey below
+  # instead proves a post-commit output and durable-state sequence boundary.
   drain_for 8000
+}
+proc stroke_and_wait_ready {powerBlocks log shotOrdinal club direction} {
+  key " "
+  # This match consumes the PTY stream through the selected complete meter
+  # frame, establishing the output-sequence boundary immediately before commit.
+  wait_meter_blocks $powerBlocks
+  key "\r"
+  set power [expr {$powerBlocks / 10.0}]
+  set deadline [expr {[clock milliseconds] + 120000}]
+  set sawAim 0
+  set sawClub 0
+  set sawDirection 0
+  while {[clock milliseconds] < $deadline} {
+    set timeout 1
+    expect {
+      -re {Arrows aim · Space Stroke} { set sawAim 1 }
+      -re "Club $club" { set sawClub 1 }
+      -re "Shot Direction $direction°" { set sawDirection 1 }
+      timeout {
+        # One second with no PTY bytes is an observed playback-quiescence
+        # boundary, not elapsed-time guessing. Only then may the next input run.
+        if {$sawAim && $sawClub && $sawDirection && [durable_shot_matches $log $shotOrdinal $club $direction $power]} { return }
+      }
+      eof { error "Pi exited waiting for fresh post-commit aiming state" }
+    }
+    # The loop continuously drains PTY output while persistence/playback runs.
+  }
+  error "timed out proving post-commit HUD and durable Shot $shotOrdinal readiness"
+}
+proc wait_club_input {bytes expected {seconds 30}} {
+  set deadline [expr {[clock milliseconds] + ($seconds * 1000)}]
+  while {[clock milliseconds] < $deadline} {
+    drain_available
+    key $bytes
+    set timeout 1
+    expect {
+      -re "Club $expected" { return }
+      timeout {}
+      eof { error "Pi exited probing aiming keyboard readiness" }
+    }
+  }
+  error "timed out waiting for aiming input to render Club $expected"
+}
+proc wait_durable_shot {log shotOrdinal club direction powerBlocks {seconds 120}} {
+  set deadline [expr {[clock milliseconds] + ($seconds * 1000)}]
+  set power [expr {$powerBlocks / 10.0}]
+  while {[clock milliseconds] < $deadline} {
+    drain_for 25
+    if {[durable_shot_matches $log $shotOrdinal $club $direction $power]} { return }
+  }
+  error "timed out proving durable Shot $shotOrdinal"
 }
 
 # Readiness: drain startup/intro output through the actual aiming HUD.
@@ -70,6 +162,27 @@ switch -- $journey {
     drain_for 1500
     command "/reload"
     drain_for 2500
+  }
+  preview-readiness {
+    command "/golf"
+    wait_text {Hole Score 0} 30
+    drain_for 1200
+    set log [latest_round_log]
+    # Two sequential real inputs: 4i 90%, then Driver 100%, both due east.
+    repeat_key "\033\[B" 2
+    stroke_and_wait_ready 9 $log 1 4i 0
+    # Probe keyboard readiness with a legal Club change. Ignored playback input
+    # is retried only after an observed one-second PTY quiet boundary.
+    wait_club_input "\033\[B" 5i 30
+    wait_club_input "\033\[A" 4i 10
+    drain_available
+    # Commit a second exact sequential Stroke after proven keyboard readiness.
+    key " "
+    wait_meter_blocks 10
+    key "\r"
+    wait_durable_shot $log 2 4i 0 10
+    wait_text {Hole Score 2} 120
+    key "\033"; drain_for 1500
   }
   preview {
     command "/golf"
