@@ -99,6 +99,7 @@ proc stroke {powerBlocks nextPattern} {
   drain_for 8000
 }
 proc stroke_and_wait_ready {powerBlocks log shotOrdinal club direction} {
+  drain_available
   key " "
   # This match consumes the PTY stream through the selected complete meter
   # frame, establishing the output-sequence boundary immediately before commit.
@@ -125,6 +126,14 @@ proc stroke_and_wait_ready {powerBlocks log shotOrdinal club direction} {
     # The loop continuously drains PTY output while persistence/playback runs.
   }
   error "timed out proving post-commit HUD and durable Shot $shotOrdinal readiness"
+}
+proc stroke_and_wait_text {powerBlocks log shotOrdinal club direction pattern} {
+  drain_available
+  key " "
+  wait_meter_blocks $powerBlocks
+  key "\r"
+  wait_durable_shot $log $shotOrdinal $club $direction $powerBlocks 120
+  wait_text $pattern 120
 }
 proc wait_club_input {bytes expected {seconds 30}} {
   set deadline [expr {[clock milliseconds] + ($seconds * 1000)}]
@@ -188,33 +197,41 @@ switch -- $journey {
     command "/golf"
     wait_text {Hole Score 0} 30
     drain_for 1200
-    # Hole 1: 4i 90%, then Driver 100% on the direct Cup bearing.
+    set log [latest_round_log]
+    # Every next input follows fresh durable state plus a quiescent aiming HUD.
+    # Hole 1 begins with the reconciled actual-Pi 4i sequence, then follows the
+    # simulator-derived route from its exact revision-2 Lie.
     repeat_key "\033\[B" 2
-    stroke 9 {Arrows aim}
-    repeat_key "\033\[A" 2
-    stroke 10 {It's in the hole!}
+    stroke_and_wait_ready 9 $log 1 4i 0
+    wait_club_input "\033\[B" 5i 30
+    wait_club_input "\033\[A" 4i 10
+    stroke_and_wait_ready 10 $log 2 4i 0
+    wait_club_input "\033\[B" 5i 10
+    wait_club_input "\033\[B" 6i 10
+    wait_club_input "\033\[B" 7i 10
+    stroke_and_wait_ready 8 $log 3 7i 0
+    wait_club_input "\033\[B" 8i 10
+    wait_club_input "\033\[B" 9i 10
+    wait_club_input "\033\[B" pw 10
+    wait_club_input "\033\[B" putter 10
+    repeat_key "\033\[C" 7
+    stroke_and_wait_text 1 $log 4 putter 7 {It's in the hole!}
     key "\r"; wait_text {Hole 2} 20; drain_for 1200
-    # Hole 2: Driver 100%, then Driver 30%.
-    stroke 10 {Arrows aim}
-    stroke 3 {It's in the hole!}
+    # Hole 2 follows its discrete Cup bearing: 315°, then 22.5°.
+    repeat_key "\033\[D" 2
+    stroke_and_wait_ready 10 $log 5 driver 14
+    repeat_key "\033\[C" 3
+    stroke_and_wait_text 3 $log 6 driver 1 {It's in the hole!}
     key "\r"; wait_text {Hole 4} 20; drain_for 1200
-    # Hole 4: Driver, PW positioning, Driver carry over Water, three PW
-    # approaches, then bounded 10% putts until actual Cup capture.
-    stroke 10 {Arrows aim}
-    repeat_key "\033\[B" 8
-    stroke 10 {Arrows aim}
+    # Hole 4 uses the simulator-derived airborne Water crossing and return putt.
+    repeat_key "\033\[D" 1
+    stroke_and_wait_ready 9 $log 7 driver 0
+    stroke_and_wait_ready 10 $log 8 driver 0
     repeat_key "\033\[B" 2
-    stroke 10 {Arrows aim}
-    repeat_key "\033\[A" 2
-    stroke 10 {Arrows aim}
-    stroke 10 {Arrows aim}
-    stroke 7 {Arrows aim}
+    stroke_and_wait_ready 10 $log 9 4i 0
     repeat_key "\033\[B" 1
-    for {set putt 0} {$putt < 6} {incr putt} {
-      stroke 1 {Arrows aim|It's in the hole!}
-      # Stop when the summary text is present in the retained transcript.
-      if {[string first "It's in the hole!" $expect_out(buffer)] >= 0} { break }
-    }
+    repeat_key "\033\[C" 8
+    stroke_and_wait_text 1 $log 10 5i 8 {It's in the hole!}
     wait_text {Round complete} 30
     wait_text {Total Par 12} 10
     key "\033"; drain_for 1500
